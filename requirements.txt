@@ -1,0 +1,4 @@
+numpy
+ndspy
+PySide6
+sounddevice

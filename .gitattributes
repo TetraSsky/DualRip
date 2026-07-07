@@ -1,0 +1,31 @@
+# Normalize line endings for all text files
+* text=auto
+
+# Python sources
+*.py text diff=python
+*.pyw text
+
+# Batch scripts (must stay CRLF on Windows)
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Shell scripts (must stay LF)
+*.sh text eol=lf
+
+# Markdown / text
+*.md text
+*.txt text
+*.toml text
+*.cfg text
+*.ini text
+*.yml text
+*.yaml text
+
+# Git / CI
+.gitignore text
+.gitattributes text
+
+# Binaries (don't touch)
+*.ico binary
+*.png binary
+*.exe binary
