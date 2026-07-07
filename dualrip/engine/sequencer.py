@@ -632,7 +632,7 @@ class Track:
 
 
 class Player:
-    def __init__(self, blob, bank, waveArc, sample_rate, sseq_vol):
+    def __init__(self, blob, bank, waveArc, sample_rate, sseq_vol, player_prio=0):
         self.blob = blob
         self.bank = bank
         self.waveArc = waveArc
@@ -642,7 +642,7 @@ class Player:
         self.loop_end_sample = None
         self.ticked = False
         self.now_sample = 0
-        self.prio = 0
+        self.prio = player_prio
         self.tempo = 120
         self.tempoCount = 0
         self.tempoRate = 0x100

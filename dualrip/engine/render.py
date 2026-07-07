@@ -20,15 +20,17 @@ from ..cprims import (
 from .sequencer import Player
 
 
-def render_entry(blob, start_offset, bank, waveArc, entry_volume, rate, hold_seconds=2.0):
+def render_entry(blob, start_offset, bank, waveArc, entry_volume, rate, hold_seconds=2.0, player_prio=0):
     """Render one SSAR entry in raw form.
     Returns (stereo int16, looped: bool, loop_marks: (start, end) samples or None).
 
     Raw = one iteration of every loop, full release envelopes, native rests
     preserved. PSG/noise endless notes released hold_seconds after idle.
     Only the fixed ~15 ms sequencer warm-up is skipped.
+    player_prio is the channel-priority base from the SDAT INFO (cpr field),
+    exactly what the game passes at runtime.
     """
-    ply = Player(blob, bank, waveArc, rate, cnv_scale(entry_volume))
+    ply = Player(blob, bank, waveArc, rate, cnv_scale(entry_volume), player_prio)
     ply.setup(start_offset)
     ply.timer()
 

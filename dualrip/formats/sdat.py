@@ -27,13 +27,14 @@ def _swar_wave_count(war):
 class SeqArcEntry:
     """One sound entry of a sequence archive (SSAR)."""
 
-    __slots__ = ('index', 'name', 'bank_id', 'volume', 'offset')
+    __slots__ = ('index', 'name', 'bank_id', 'volume', 'cpr', 'offset')
 
-    def __init__(self, index, name, bank_id, volume, offset):
+    def __init__(self, index, name, bank_id, volume, cpr, offset):
         self.index = index
         self.name = name
         self.bank_id = bank_id
         self.volume = volume
+        self.cpr = cpr  # channel-priority base the game passes at runtime
         self.offset = offset  # None for null/placeholder slots
 
 
@@ -77,7 +78,8 @@ class SdatFile:
             entries = []
             for idx, (sname, seq) in enumerate(arc.sequences):
                 if seq is None or seq.firstEventOffset is None:
-                    entries.append(SeqArcEntry(idx, sname or f'SEQ_{idx}', None, None, None))
+                    entries.append(SeqArcEntry(idx, sname or f'SEQ_{idx}',
+                                               None, None, None, None))
                 else:
                     entries.append(
                         SeqArcEntry(
@@ -85,6 +87,7 @@ class SdatFile:
                             sname or f'SEQ_{idx}',
                             seq.bankID,
                             seq.volume,
+                            seq.channelPressure,  # ndspy's name for cpr
                             seq.firstEventOffset,
                         )
                     )

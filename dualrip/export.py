@@ -92,7 +92,7 @@ def render_one(sdat, seqarc, entry, rate=44100, resolver=None):
         label = str(entry.bank_id) if rbid == entry.bank_id else f'{entry.bank_id}->{rbid}'
         bank, wave_arc = sdat.bank(rbid)
         audio, looped, marks = render_entry(
-            seqarc.blob, entry.offset, bank, wave_arc, entry.volume, rate
+            seqarc.blob, entry.offset, bank, wave_arc, entry.volume, rate, player_prio=entry.cpr or 0
         )
         peak = int(np.abs(audio.astype(np.int32)).max()) if len(audio) else 0
         if len(audio) == 0 or peak == 0:
