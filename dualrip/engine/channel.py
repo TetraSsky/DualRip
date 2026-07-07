@@ -349,7 +349,8 @@ class Channel:
             totalLen = reg.totalLength
             loopStart = reg.loopStart
             loopLen = reg.length
-            idx0 = np.floor(positions).astype(np.int64)
+            fpos = np.floor(positions)
+            idx0 = fpos.astype(np.int64)
             valid = idx0 >= 0
             if reg.repeatMode == 1 and loopLen > 0:
                 big = idx0 >= totalLen
@@ -362,11 +363,12 @@ class Channel:
             else:
                 valid &= idx0 < totalLen
                 idx1 = np.minimum(idx0 + 1, totalLen - 1)
-            idx0c = np.clip(idx0, 0, len(data) - 1)
-            idx1c = np.clip(idx1, 0, len(data) - 1)
+            hi = len(data) - 1
+            idx0c = np.minimum(np.maximum(idx0, 0), hi)
+            idx1c = np.minimum(np.maximum(idx1, 0), hi)
             d0 = data[idx0c]
             d1 = data[idx1c]
-            frac = positions - np.floor(positions)
+            frac = positions - fpos
             samples = (d0 + frac * (d1 - d0)).astype(np.int64)
             samples[~valid] = 0
             if reg.repeatMode == 1 and self.loop_pass_sample is None and inc > 0:

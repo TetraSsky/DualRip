@@ -17,7 +17,7 @@ import numpy as np
 
 try:
     import sounddevice as _sd
-except Exception:  # missing package or no audio backend on this machine
+except Exception: # missing package or no audio backend on this machine
     _sd = None
 
 STOPPED = 'stopped'
@@ -29,13 +29,13 @@ class _Player:
         self._lock = threading.Lock()
         self._stream = None
         self._stream_rate = None
-        self._data = None       # int16 stereo ndarray, kept loaded across stops
+        self._data = None # int16 stereo ndarray, kept loaded across stops
         self._rate = 0
-        self._pos = 0           # playhead, in frames
+        self._pos = 0 # playhead, in frames
         self._state = STOPPED
         self._loop = False
-        self._loop_start = 0    # loop region, in frames (end exclusive);
-        self._loop_end = 0      # equals (0, len) when the sound has no marks
+        self._loop_start = 0 # loop region, in frames (end exclusive);
+        self._loop_end = 0 # equals (0, len) when the sound has no marks
 
     # PortAudio callback: copy the next slice of the current buffer, wrapping
     # inside the loop region when looping; silence when idle. Never raises.
@@ -94,7 +94,7 @@ class _Player:
         if audio.ndim != 2 or audio.shape[1] != 2 or len(audio) == 0:
             return False
         with self._lock:
-            self._data = None       # silence while (re)arming
+            self._data = None # silence while (re)arming
             self._state = STOPPED
             self._pos = 0
         if not self._ensure_stream(rate):

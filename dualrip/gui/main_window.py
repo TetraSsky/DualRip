@@ -479,8 +479,8 @@ class MainWindow(QMainWindow):
                     + (f' ({cached.error})' if cached.error else '')
                 )
             return
-        # One render at a time; a new request while one is in flight simply
-        # replaces the pending one (last click wins).
+        audio.stop()
+
         self._preview_pending = (seqarc, entry)
         self.statusBar().showMessage(f'Rendering {entry.name}...')
         self._start_pending_preview()
