@@ -1,0 +1,60 @@
+name: Release
+on:
+  push:
+    tags: ["v*"]
+jobs:
+  release:
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-22.04, macos-latest, macos-15-intel]
+        include:
+          - os: windows-latest
+            artifact: DualRip.exe
+            spec: dualrip.spec
+          - os: ubuntu-22.04
+            artifact: DualRip-linux
+            spec: dualrip_linux.spec
+          - os: macos-latest
+            artifact: DualRip-macos-arm64
+            spec: dualrip_macos.spec
+          - os: macos-15-intel
+            artifact: DualRip-macos-x86_64
+            spec: dualrip_macos.spec
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Linux system deps (PySide6 xcb plugin + PortAudio)
+        if: startsWith(matrix.os, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libportaudio2 libegl1 libxkbcommon0 \
+            libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
+            libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 \
+            libxcb-xinerama0 libdbus-1-3
+      - run: pip install -e .[gui] pyinstaller
+      - run: pyinstaller ${{ matrix.spec }}
+      - name: Rename per-platform
+        if: matrix.os != 'windows-latest'
+        run: mv dist/DualRip dist/${{ matrix.artifact }}
+        shell: bash
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/${{ matrix.artifact }}
+          body: |
+            - Rips every SSAR entry of a sound_data.sdat to WAV (CLI + GUI).
+            - Raw export: one loop iteration per sound, native rests kept, full release envelopes; loop points in manifest.csv and embedded in the WAV as a smpl chunk.
+            - NULL/dynamic bank slots resolved automatically per entry (--bank-map to override).
+            - GUI: SDAT browser with filter, preview player (seek / pause / loop on the sound's own loop points), multi-select batch export with a live log.
+
+            Pre-built binaries attached below: Windows (`DualRip.exe`), Linux x86_64 (`DualRip-linux`), macOS Apple Silicon (`DualRip-macos-arm64`) and macOS Intel (`DualRip-macos-x86_64`). Python users: `pip install -e .[gui]`.
+            **Linux/macOS**: the download has no execute bit set — run `chmod +x DualRip-*` first.
+            **macOS**: the binary is unsigned, so Gatekeeper will refuse the first launch; right-click > Open, or if that's not offered, run `xattr -d com.apple.quarantine DualRip-macos-*` in Terminal.
+
+            Engine is a port of the FSS/NCSF SSEQ player - credits in the README !
+
+            **Full Changelog**: https://github.com/TetraSsky/DualRip/commits/${{ github.ref_name }}
