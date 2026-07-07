@@ -1,4 +1,6 @@
-"""Playback bar widget (seek slider, loop toggle, Play/Pause/Stop)."""
+"""
+Playback bar widget (seek slider, loop toggle, Play/Pause/Stop).
+"""
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
@@ -12,11 +14,9 @@ from PySide6.QtWidgets import (
     QStyleOptionSlider,
     QVBoxLayout,
 )
-
 from . import audio
 
 POLL_MS = 40  # playhead refresh period
-
 
 class SeekSlider(QSlider):
     """Slider that seeks to clicked position (default QSlider pages)."""
@@ -37,9 +37,8 @@ class SeekSlider(QSlider):
                 self.setValue(value)
         super().mousePressEvent(event)
 
-
 class PlayerBar(QFrame):
-    play_clicked = Signal()   # the main window decides what to (re)render
+    play_clicked = Signal() # the main window decides what to (re)render
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -56,9 +55,7 @@ class PlayerBar(QFrame):
         self.slider.sliderMoved.connect(self._drag_moved)
         top.addWidget(self.slider, 1)
         self.chk_loop = QCheckBox('Loop', self)
-        self.chk_loop.setToolTip(
-            "Loop playback; uses the sound's own loop points when it has "
-            'some, otherwise the whole sound.')
+        self.chk_loop.setToolTip("Loop playback; uses the sound's own loop points when it has some, otherwise the whole sound.")
         self.chk_loop.toggled.connect(audio.set_loop)
         top.addWidget(self.chk_loop)
 
@@ -120,7 +117,7 @@ class PlayerBar(QFrame):
         self.slider.setRange(0, 0)
         self.lbl_time.setText('-')
 
-    def setEnabled(self, enabled):  # noqa: N802 (Qt override)
+    def setEnabled(self, enabled): # noqa: N802 (Qt override)
         super().setEnabled(enabled and audio.available())
 
     def _fmt(self, frames):

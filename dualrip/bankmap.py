@@ -6,7 +6,6 @@
 # shifts, table indexing) are intentional. Do not "simplify".
 
 from collections import Counter
-
 from .engine.sequencer import (
     EXTRA_BYTE,
     SSEQ_CMD_CALL,
@@ -24,8 +23,7 @@ from .engine.sequencer import (
     sseq_command_byte_count,
 )
 
-MAX_SCAN_STEPS = 2000  # per-branch safety bound for malformed bytecode
-
+MAX_SCAN_STEPS = 2000 # per-branch safety bound for malformed bytecode
 
 def scan_patches(blob, off):
     """Static scan of the patches (instrument numbers) a sequence entry uses."""
@@ -70,7 +68,6 @@ def scan_patches(blob, off):
     # a sequence with no PATCH command plays with the default patch 0
     return out or {0}
 
-
 def patch_playable(entries, slot_sizes, p):
     """True if patch p exists and all its instruments can actually resolve
     their sample (wave archive slot present and wave index in range).
@@ -83,7 +80,6 @@ def patch_playable(entries, slot_sizes, p):
                 return False
     return True
 
-
 def parse_bank_map(text):
     """Parse "4=32,30=6" or "4=32+33+43" into {src: [candidates]}."""
     out = {}
@@ -92,7 +88,6 @@ def parse_bank_map(text):
             src, dst = pair.split('=')
             out[int(src)] = [int(x) for x in dst.split('+')]
     return out
-
 
 class BankResolver:
     """Resolve NULL/dynamic bank slots via family-affinity + coverage ranking."""

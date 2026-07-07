@@ -1,4 +1,5 @@
-"""Background workers: rendering happens in plain Python threads, results
+"""
+Background workers: rendering happens in plain Python threads, results
 come back to the GUI thread through queued signal deliveries.
 
 Each worker is a QObject created in the GUI thread that owns a daemon
@@ -15,11 +16,8 @@ GUI thread, never from the worker thread.
 """
 
 import threading
-
 from PySide6.QtCore import QObject, Signal
-
-from ..export import render_one, rip_archive
-
+from ..export import render_one, rip_archive, rip_sequences
 
 class _ThreadWorker(QObject):
     def __init__(self, parent=None):
@@ -45,7 +43,6 @@ class _ThreadWorker(QObject):
     def _run(self):
         raise NotImplementedError
 
-
 class RenderWorker(_ThreadWorker):
     """Render a single entry in memory (preview / details)."""
 
@@ -65,13 +62,17 @@ class RenderWorker(_ThreadWorker):
             return
         self._emit(self.done, self._key, res)
 
-
 class BatchWorker(_ThreadWorker):
-    """Rip a list of jobs [(arc_id, only_indices_or_None)] to disk, with
-    per-entry progress, per-archive summaries and cancellation."""
+    """Rip a list of tagged jobs to disk, with per-entry progress, per-job
+    summaries and cancellation.
+
+    Each job is (kind, ident, sel):
+      ('arc', arc_id, only_set_or_None)  -> one SSAR archive
+      ('seq', None, seq_set_or_None)     -> standalone SSEQ music (None = all)
+    """
 
     batch_progress = Signal(int, int, object)  # done, total, RenderResult
-    archive_done = Signal(object)  # per-archive summary dict
+    archive_done = Signal(object)  # per-job summary dict
     batch_done = Signal(object)  # list of summaries
     failed = Signal(str)
 
@@ -87,36 +88,54 @@ class BatchWorker(_ThreadWorker):
     def cancel(self):
         self._cancel.set()
 
-    def _job_size(self, arc_id, only):
-        if only is not None:
-            return len(only)
-        return len(self._sdat.seqarc(arc_id).entries)
+    def _seq_ids(self, sel):
+        if sel is not None:
+            return sorted(sel)
+        return [sid for sid, _n, _b in self._sdat.sequence_list]
+
+    def _job_size(self, kind, ident, sel):
+        if kind == 'seq':
+            return len(self._seq_ids(sel))
+        if sel is not None:
+            return len(sel)
+        return len(self._sdat.seqarc(ident).entries)
 
     def _run(self):
         try:
             summaries = []
-            grand_total = sum(self._job_size(a, o) for a, o in self._jobs)
+            grand_total = sum(self._job_size(*j) for j in self._jobs)
             base = 0
-            for arc_id, only in self._jobs:
+            for kind, ident, sel in self._jobs:
                 if self._cancel.is_set():
                     break
 
                 def progress(done, _total, res, _base=base):
                     self._emit(self.batch_progress, _base + done, grand_total, res)
 
-                summary = rip_archive(
-                    self._sdat,
-                    arc_id,
-                    self._out_root,
-                    rate=self._rate,
-                    override_map=self._override,
-                    only=only,
-                    progress=progress,
-                    should_cancel=self._cancel.is_set,
-                )
+                if kind == 'seq':
+                    summary = rip_sequences(
+                        self._sdat,
+                        self._seq_ids(sel),
+                        self._out_root,
+                        rate=self._rate,
+                        override_map=self._override,
+                        progress=progress,
+                        should_cancel=self._cancel.is_set,
+                    )
+                else:
+                    summary = rip_archive(
+                        self._sdat,
+                        ident,
+                        self._out_root,
+                        rate=self._rate,
+                        override_map=self._override,
+                        only=sel,
+                        progress=progress,
+                        should_cancel=self._cancel.is_set,
+                    )
                 summaries.append(summary)
                 self._emit(self.archive_done, summary)
-                base += self._job_size(arc_id, only)
+                base += self._job_size(kind, ident, sel)
             self._emit(self.batch_done, summaries)
         except Exception as exc:
             self._emit(self.failed, str(exc))

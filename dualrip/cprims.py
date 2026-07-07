@@ -27,32 +27,24 @@ F_UPDVOL, F_UPDPAN, F_UPDTMR = 0, 1, 2
 TF_VOL, TF_PAN, TF_TIMER, TF_MOD, TF_LEN = 0, 1, 2, 3, 4
 TS_ALLOC, TS_NOTEWAIT, TS_PORTA, TS_TIE, TS_END = 0, 1, 2, 3, 4
 
-
-
-
 def cdiv(a, b):
     """C integer division (truncates toward zero)."""
     q = abs(a) // abs(b)
     return q if (a >= 0) == (b >= 0) else -q
 
-
 def s8(x):
     return ((x + 0x80) & 0xFF) - 0x80
-
 
 def s16(x):
     return ((x + 0x8000) & 0xFFFF) - 0x8000
 
-
 def muldiv7(val, mul):
     return val if mul == 127 else (val * mul) >> 7
-
 
 def cnv_attack(attk):
     if attk & 0x80:
         attk = 0
     return ATTACK_LUT[0x7F - attk] if attk >= 0x6D else 0xFF - attk
-
 
 def cnv_fall(fall):
     if fall & 0x80:
@@ -65,18 +57,15 @@ def cnv_fall(fall):
         return ((fall << 1) + 1) & 0xFFFF
     return (0x1E00 // (0x7E - fall)) & 0xFFFF
 
-
 def cnv_scale(scale):
     if scale & 0x80:
         scale = 0x7F
     return SCALE_LUT[scale]
 
-
 def cnv_sust(sust):
     if sust & 0x80:
         sust = 0x7F
     return SUST_LUT[sust]
-
 
 def cnv_sine(arg):
     # quarter-wave table, full period = 128 steps
@@ -88,7 +77,6 @@ def cnv_sine(arg):
     if arg <= 96:
         return -SINE_LUT[arg - 64]
     return -SINE_LUT[128 - arg]
-
 
 def timer_adjust(basetmr, pitch):
     """Ported from disassembly of Nintendo's sound driver."""
@@ -115,7 +103,6 @@ def timer_adjust(basetmr, pitch):
     if tmr > 0xFFFF:
         return 0xFFFF
     return tmr
-
 
 def calc_voldiv_shift(x):
     return x if x < 3 else 4

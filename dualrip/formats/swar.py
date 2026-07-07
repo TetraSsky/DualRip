@@ -6,9 +6,7 @@
 # shifts, table indexing) are intentional. Do not "simplify".
 
 import struct
-
 import numpy as np
-
 from .common import NNS_RECORD_COUNT_OFF, NNS_RECORD_TABLE_OFF
 
 IMA_INDEX_TABLE = (-1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 6, 8)
@@ -23,7 +21,6 @@ IMA_STEP_TABLE = (
     5894, 6484, 7132, 7845, 8630, 9493, 10442, 11487, 12635, 13899,
     15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767,
 )
-
 
 def decode_adpcm(raw):
     pred = struct.unpack_from('<h', raw, 0)[0]
@@ -60,7 +57,6 @@ def decode_adpcm(raw):
             pos += 1
     return out
 
-
 class Swav:
     __slots__ = ('waveType', 'loop', 'sampleRate', 'time', 'loopStart', 'length', 'data')
 
@@ -82,7 +78,6 @@ class Swav:
             self.data = decode_adpcm(raw)
             self.loopStart = (loopOffset - 1) * 8 if loopOffset else 0
             self.length = nonLoopLength * 8
-
 
 def parse_swar(data):
     count = struct.unpack_from('<I', data, NNS_RECORD_COUNT_OFF)[0]

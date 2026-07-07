@@ -46,7 +46,6 @@ def readvl(blob, pc):
             break
     return x, pc
 
-
 # SSEQ bytecode command values needed OUTSIDE the interpreter loop (the
 # static patch scanner in bankmap.py walks the same bytecode). Inside
 # execute_command() below, the full command set is intentionally dispatched
@@ -85,12 +84,10 @@ _CMD_BYTES[0x93] = 4
 _CMD_BYTES[0xA1] = 1 | EXTRA_BYTE
 _CMD_BYTES[0xA0] = 4 | EXTRA_BYTE
 
-
 def sseq_command_byte_count(cmd):
     if cmd < 0x80:
         return 1 | VARIABLE_BYTE_COUNT
     return _CMD_BYTES.get(cmd, 0)
-
 
 class Rng:
     def __init__(self):
@@ -99,7 +96,6 @@ class Rng:
     def calc(self):
         self.u = (self.u * 1664525 + 1013904223) & 0xFFFFFFFF
         return (self.u >> 16) & 0xFFFF
-
 
 class Track:
     __slots__ = (
@@ -629,7 +625,6 @@ class Track:
 
             if cmd not in (0xA0, 0xA1):
                 self.over_active = False
-
 
 class Player:
     def __init__(self, blob, bank, waveArc, sample_rate, sseq_vol, player_prio=0):

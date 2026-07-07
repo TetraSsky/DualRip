@@ -1,4 +1,6 @@
-"""DualRip dialogs: Settings and the Export confirmation/log window."""
+"""
+DualRip dialogs: Settings and the Export confirmation/log window.
+"""
 
 import os
 
@@ -19,7 +21,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QVBoxLayout,
 )
-
 from ..bankmap import parse_bank_map
 from .workers import BatchWorker
 
@@ -27,7 +28,6 @@ RATES = ('32728', '44100', '48000')  # presets; the combo stays editable
 RATE_MIN, RATE_MAX = 8000, 192000
 EXPORT_DIALOG_SIZE = (680, 460)
 LOG_MAX_LINES = 20000  # keep huge batches from growing the log unbounded
-
 
 def load_settings():
     s = QSettings('DualRip', 'DualRip')
@@ -41,12 +41,10 @@ def load_settings():
         'bank_map': s.value('bank_map', '') or '',
     }
 
-
 def save_settings(values):
     s = QSettings('DualRip', 'DualRip')
     for k, v in values.items():
         s.setValue(k, v)
-
 
 class SettingsDialog(QDialog):
     def __init__(self, parent=None):
@@ -121,11 +119,11 @@ class SettingsDialog(QDialog):
         )
         self.accept()
 
-
 class ExportDialog(QDialog):
     """Confirmation + live log window for a batch export.
 
-    jobs: [(arc_id, only_indices_or_None)]
+    jobs: [(kind, ident, sel)] where kind is 'arc' (ident=arc_id) or 'seq'
+    (ident=None); sel is a set of indices/ids or None for the whole thing.
     """
 
     def __init__(self, sdat, jobs, rate, override_map, parent=None):
@@ -142,10 +140,8 @@ class ExportDialog(QDialog):
 
         lay = QVBoxLayout(self)
 
-        total = sum(
-            len(only) if only is not None else len(sdat.seqarc(a).entries) for a, only in jobs
-        )
-        self.lbl_summary = QLabel(f'{total} entries from {len(jobs)} archive(s), {rate} Hz')
+        total = sum(self._job_size(kind, ident, sel) for kind, ident, sel in jobs)
+        self.lbl_summary = QLabel(f'{total} items from {len(jobs)} group(s), {rate} Hz')
         lay.addWidget(self.lbl_summary)
 
         row = QHBoxLayout()
@@ -179,18 +175,46 @@ class ExportDialog(QDialog):
         btns.addWidget(self.btn_cancel)
         lay.addLayout(btns)
 
+    def _all_seq_ids(self):
+        return [sid for sid, _n, _b in self._sdat.sequence_list]
+
+    def _job_size(self, kind, ident, sel):
+        if kind == 'seq':
+            return len(sel) if sel is not None else len(self._all_seq_ids())
+        if sel is not None:
+            return len(sel)
+        return len(self._sdat.seqarc(ident).entries)
+
     def _plan(self):
         self.log.appendPlainText('Export :')
-        for arc_id, only in self._jobs:
-            seqarc = self._sdat.seqarc(arc_id)
-            if only is None:
-                self.log.appendPlainText(
-                    f'  {arc_id:03d} {seqarc.name} - all {len(seqarc.entries)} entries'
-                )
+        seq_names = None
+        for kind, ident, sel in self._jobs:
+            if kind == 'seq':
+                if seq_names is None:
+                    seq_names = {sid: name for sid, name, _b in self._sdat.sequence_list}
+                ids = sorted(sel) if sel is not None else self._all_seq_ids()
+                if sel is None:
+                    self.log.appendPlainText(f'  SSEQ (music) - all {len(ids)} sequences')
+                else:
+                    self.log.appendPlainText(f'  SSEQ (music) - {len(ids)} sequences:')
+                    for sid in ids:
+                        self.log.appendPlainText(
+                            f'      [{sid:3d}] {seq_names.get(sid, sid)}'
+                        )
             else:
-                self.log.appendPlainText(f'  {arc_id:03d} {seqarc.name} - {len(only)} entries:')
-                for idx in sorted(only):
-                    self.log.appendPlainText(f'      [{idx:3d}] {seqarc.entries[idx].name}')
+                seqarc = self._sdat.seqarc(ident)
+                if sel is None:
+                    self.log.appendPlainText(
+                        f'  {ident:03d} {seqarc.name} - all {len(seqarc.entries)} entries'
+                    )
+                else:
+                    self.log.appendPlainText(
+                        f'  {ident:03d} {seqarc.name} - {len(sel)} entries:'
+                    )
+                    for idx in sorted(sel):
+                        self.log.appendPlainText(
+                            f'      [{idx:3d}] {seqarc.entries[idx].name}'
+                        )
         self.log.appendPlainText('')
 
     def _browse(self):

@@ -1,11 +1,10 @@
 # DualRip
 
-Rips Nintendo DS sound effects (SSAR inside `sound_data.sdat`) to WAV by
-emulating the DS sound driver. CLI + GUI.
+Rips Nintendo DS sound effects (SSAR) and music (SSEQ) inside `sound_data.sdat` to WAV by emulating the DS sound driver. CLI + GUI.
 
 ## What you get
 
-- One loop iteration per sound, full release envelopes, native rests preserved.
+- One loop iteration per sound or song, full release envelopes, native rests preserved.
 - Loop points in `manifest.csv` and embedded in the WAV as a `smpl` chunk.
 
 ## Screenshots
@@ -23,17 +22,20 @@ Batch export with per-entry log, loop points and bank auto-resolution notes:
 
 ```
 dualrip --sdat sound_data.sdat --archive all --out MyRip
+dualrip --sdat sound_data.sdat --sequence all --out MyMusic
 ```
 
 | Option | Effect |
 |---|---|
-| `--archive N` | rip one archive (default `all`) |
+| `--archive N` | rip one SSAR archive, or `all` (default when no `--sequence`) |
+| `--sequence N...` | rip these SSEQ music indices, or `all` (into an `SSEQ/` subfolder) |
 | `--rate N` | sample rate (default 44100) |
 | `--only I J...` | only these entry indices |
 | `--bank-map "4=32+33"` | override bank resolution |
 
-GUI: open a `.sdat`, browse/filter, double-click to preview (seek, pause,
-loop on the sound's own loop points), Ctrl/Shift-select and export.
+GUI: open a `.sdat`, browse/filter, double-click to preview any sound effect
+or music track (seek, pause, loop on its own loop points), Ctrl/Shift-select
+sound effects, archives or sequences and export.
 
 ## Dynamic bank slots
 
@@ -55,7 +57,7 @@ dualrip/tables.py, cprims.py   lookup tables, C-semantics primitives
 dualrip/formats/               SWAR/SWAV, SBNK, SDAT (only sdat.py touches ndspy)
 dualrip/engine/                sequencer, envelopes/synthesis, raw-export policy
 dualrip/bankmap.py             static patch scan + auto bank resolution
-dualrip/export.py              WAV/manifest, public API: render_one / rip_archive
+dualrip/export.py              WAV/manifest, public API: render_one / rip_archive / rip_sequences
 dualrip/cli.py, gui/           frontends
 ```
 

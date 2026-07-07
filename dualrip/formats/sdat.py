@@ -1,4 +1,5 @@
-"""SDAT container access for DualRip.
+"""
+SDAT container access for DualRip.
 
 This is the ONLY module that touches ndspy. Everything else works on plain
 Python/numpy structures, so the container backend can be swapped or
@@ -6,9 +7,7 @@ internalized later without touching the engine.
 """
 
 import struct
-
 import ndspy.soundArchive
-
 from .common import (
     BANK_WAVE_ARCHIVE_SLOTS,
     NNS_RECORD_COUNT_OFF,
@@ -17,12 +16,10 @@ from .common import (
 from .sbnk import parse_sbnk
 from .swar import parse_swar
 
-
 def _swar_wave_count(war):
     """Number of waves in an ndspy wave archive, without decoding samples."""
     raw = bytes(war.save()[0][: NNS_RECORD_COUNT_OFF + 4])
     return struct.unpack_from('<I', raw, NNS_RECORD_COUNT_OFF)[0]
-
 
 class SeqArcEntry:
     """One sound entry of a sequence archive (SSAR)."""
@@ -34,12 +31,16 @@ class SeqArcEntry:
         self.name = name
         self.bank_id = bank_id
         self.volume = volume
-        self.cpr = cpr  # channel-priority base the game passes at runtime
-        self.offset = offset  # None for null/placeholder slots
-
+        self.cpr = cpr # channel-priority base the game passes at runtime
+        self.offset = offset # None for null/placeholder slots
 
 class SeqArc:
-    """A sequence archive: shared event blob + entry table."""
+    """A sequence archive: shared event blob + entry table.
+
+    A standalone SSEQ (music) is modelled as a one-entry SeqArc whose arc_id
+    is ('SSEQ', seq_id), so it flows through the same render_one/BankResolver
+    path as SSAR sound effects with no special casing in the engine.
+    """
 
     __slots__ = ('arc_id', 'name', 'blob', 'entries')
 
@@ -49,6 +50,9 @@ class SeqArc:
         self.blob = blob
         self.entries = entries
 
+# SSEQ header's 16 bytes, then DATA. 0x18 holds the offset to the actual song events
+# Playback just starts at the beginning like an SSAR with a 0 offset
+SSEQ_EVENTS_PTR_OFF = 0x18
 
 class SdatFile:
     """Read-only view over a sound_data.sdat with lazy, cached parsing."""
@@ -57,6 +61,7 @@ class SdatFile:
         self.path = path
         self._sdat = ndspy.soundArchive.SDAT.fromFile(path)
         self._seqarc_cache = {}
+        self._seq_cache = {}
         self._bank_cache = {}
         self._meta_cache = {}
         self._swar_cache = {}
@@ -86,7 +91,7 @@ class SdatFile:
                             sname or f'SEQ_{idx}',
                             seq.bankID,
                             seq.volume,
-                            seq.channelPressure,  # ndspy's name for cpr
+                            seq.channelPressure, # ndspy's name for cpr
                             seq.firstEventOffset,
                         )
                     )
@@ -104,6 +109,23 @@ class SdatFile:
                 out.append((i, name or f'SSEQ_{i}', getattr(seq, 'bankID', None)))
         return out
 
+    def sequence(self, seq_id):
+        """A standalone SSEQ as a one-entry SeqArc (arc_id ('SSEQ', seq_id)),
+        so the SSAR render_one / BankResolver path renders it unchanged. The
+        entry's index is the sequence id (used for file names and manifests);
+        its offset is 0 because a sequence file carries only its own events."""
+        if seq_id not in self._seq_cache:
+            name, seq = self._sdat.sequences[seq_id]
+            if seq is None:
+                raise ValueError(f'sequence {seq_id} is null')
+            raw = bytes(seq.save()[0])
+            ev_off = struct.unpack_from('<I', raw, SSEQ_EVENTS_PTR_OFF)[0]
+            blob = raw[ev_off:]
+            sname = name or f'SSEQ_{seq_id}'
+            entry = SeqArcEntry(seq_id, sname, seq.bankID, seq.volume, seq.channelPressure, 0)
+            self._seq_cache[seq_id] = SeqArc(('SSEQ', seq_id), sname, blob, [entry])
+        return self._seq_cache[seq_id]
+
     @property
     def bank_list(self):
         """[(bank_id, name_or_None, wave_archive_ids_or_None)]; None ids for
@@ -113,8 +135,7 @@ class SdatFile:
             if bnk is None:
                 out.append((i, name, None))
             else:
-                out.append((i, name or f'BANK_{i}',
-                            list(bnk.waveArchiveIDs)[:BANK_WAVE_ARCHIVE_SLOTS]))
+                out.append((i, name or f'BANK_{i}', list(bnk.waveArchiveIDs)[:BANK_WAVE_ARCHIVE_SLOTS]))
         return out
 
     @property

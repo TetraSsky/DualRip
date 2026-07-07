@@ -6,9 +6,7 @@
 # shifts, table indexing) are intentional. Do not "simplify".
 
 import struct
-
 from .common import NNS_RECORD_COUNT_OFF, NNS_RECORD_TABLE_OFF
-
 
 class NoteDef:
     __slots__ = (
@@ -39,10 +37,8 @@ class NoteDef:
                 self.pan,
             ) = struct.unpack_from('<HH6B', data, off)
 
-
 class BankEntry:
     __slots__ = ('record', 'instruments')
-
 
 def parse_sbnk(data):
     count = struct.unpack_from('<I', data, NNS_RECORD_COUNT_OFF)[0]

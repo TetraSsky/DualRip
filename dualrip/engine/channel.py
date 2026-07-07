@@ -6,7 +6,6 @@
 # shifts, table indexing) are intentional. Do not "simplify".
 
 import numpy as np
-
 from ..cprims import (
     AMPL_K,
     AMPL_THRESHOLD,
@@ -33,7 +32,6 @@ from ..cprims import (
     timer_adjust,
 )
 from ..tables import GETVOLTBL, WAVEDUTYTBL
-
 
 class Reg:
     __slots__ = (
@@ -82,7 +80,6 @@ class Reg:
         self.repeatMode = (cr >> 27) & 0x03
         self.format = (cr >> 29) & 0x03
         self.enable = bool((cr >> 31) & 0x01)
-
 
 class Channel:
     def __init__(self, chn_id, player):

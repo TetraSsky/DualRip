@@ -6,7 +6,6 @@
 # shifts, table indexing) are intentional. Do not "simplify".
 
 import numpy as np
-
 from ..cprims import (
     CS_ATTACK,
     CS_NONE,
@@ -18,7 +17,6 @@ from ..cprims import (
     cnv_scale,
 )
 from .sequencer import Player
-
 
 def render_entry(blob, start_offset, bank, waveArc, entry_volume, rate, hold_seconds=2.0, player_prio=0):
     """Render one SSAR entry in raw form.
@@ -49,7 +47,7 @@ def render_entry(blob, start_offset, bank, waveArc, entry_volume, rate, hold_sec
     # from the first block that can carry tick-0 audio. Everything after
     # (native rests included) is sequence content.
     recording = False
-    tick0_ran = False  # ply.ticked observed before the latest timer() call
+    tick0_ran = False # ply.ticked observed before the latest timer() call
     ended_at = None
 
     while True:

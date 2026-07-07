@@ -1,4 +1,5 @@
-"""Audio preview backend with a small transport: load / play / pause / stop /
+"""
+Audio preview backend with a small transport: load / play / pause / stop /
 seek / loop, plus position polling for a playhead.
 
 A single persistent OutputStream is kept open and fed by callback. Opening
@@ -12,7 +13,6 @@ disabled.
 """
 
 import threading
-
 import numpy as np
 
 try:
@@ -23,7 +23,6 @@ except Exception:  # missing package or no audio backend on this machine
 STOPPED = 'stopped'
 PLAYING = 'playing'
 PAUSED = 'paused'
-
 
 class _Player:
     def __init__(self):
@@ -77,9 +76,7 @@ class _Player:
             except Exception:
                 pass
         try:
-            stream = _sd.OutputStream(
-                samplerate=rate, channels=2, dtype='int16',
-                callback=self._callback)
+            stream = _sd.OutputStream(samplerate=rate, channels=2, dtype='int16', callback=self._callback)
             stream.start()
         except Exception:
             return False
@@ -171,54 +168,41 @@ class _Player:
             except Exception:
                 pass
 
-
 _player = _Player()
-
 
 def available():
     return _sd is not None
-
 
 def load(audio, rate, loop_start=None, loop_end=None):
     """Load an int16 stereo ndarray into the player. Returns success."""
     return _player.load(audio, rate, loop_start, loop_end)
 
-
 def play():
     _player.play()
-
 
 def pause():
     _player.pause()
 
-
 def stop():
     _player.stop()
-
 
 def seek(frame):
     _player.seek(frame)
 
-
 def set_loop(enabled):
     _player.set_loop(enabled)
-
 
 def state():
     return _player.state()
 
-
 def position():
     return _player.position()
-
 
 def duration():
     return _player.duration()
 
-
 def unload():
     _player.unload()
-
 
 def shutdown():
     """Close the output stream (call on application exit)."""

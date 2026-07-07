@@ -1,8 +1,9 @@
-"""DualRip main window: SDAT explorer, entry details, audio preview, export."""
+"""
+DualRip main window: SDAT explorer, entry details, audio preview, export.
+"""
 
 import os
 from collections import OrderedDict
-
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QIcon, QKeySequence
 from PySide6.QtWidgets import (
@@ -23,7 +24,6 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-
 from .. import __version__
 from ..bankmap import BankResolver, parse_bank_map
 from ..formats.sdat import SdatFile
@@ -33,6 +33,9 @@ from .player import PlayerBar
 from .workers import RenderWorker
 
 CACHE_SIZE = 48
+# Music renders are large (a 4-minute song is ~40 MB at 44.1 kHz stereo), so
+# the preview cache is also bounded by total audio bytes, not just count.
+CACHE_MAX_BYTES = 256 * 1024 * 1024
 
 # --- layout constants ---
 FORM_HSPACING = 32   # horizontal gap between label and value in the details panel
@@ -41,10 +44,11 @@ SPLITTER_RIGHT = 440  # initial right-panel width
 TREE_COL_NAME = 330   # "Name" column width in the tree
 TREE_COL_ID = 46      # "ID" column width in the tree
 
-ROLE_KIND = Qt.UserRole  # 'cat' | 'arc' | 'entry' | 'seq' | 'bank' | 'war'
+# ROLE_KIND: 'cat' | 'seqcat' | 'arc' | 'entry' | 'seq' | 'bank' | 'war'
+# 'seqcat' is the Sequences category node; selecting it exports all music.
+ROLE_KIND = Qt.UserRole
 ROLE_ARC = Qt.UserRole + 1
 ROLE_INDEX = Qt.UserRole + 2
-
 
 class MainWindow(QMainWindow):
     def __init__(self, icon_path=None):
@@ -164,8 +168,8 @@ class MainWindow(QMainWindow):
         note = QLabel(
             'Raw export: one loop iteration, native silences, full '
             'releases.\nLoop points go to manifest.csv and into a '
-            'smpl chunk in the WAV.\nCtrl/Shift-click to select '
-            'several entries or archives.'
+            'smpl chunk in the WAV.\nCtrl/Shift-click to select several '
+            'sound effects, archives or music sequences.'
         )
         note.setWordWrap(True)
         note.setStyleSheet('color: gray;')
@@ -221,9 +225,11 @@ class MainWindow(QMainWindow):
             QApplication.restoreOverrideCursor()
         self._set_loaded(True)
         n = sum(c for _i, _n, c in self.sdat.seqarc_list)
+        nseq = len(self.sdat.sequence_list)
         self.statusBar().showMessage(
             f'{os.path.basename(path)} - '
-            f'{len(self.sdat.seqarc_list)} sequence archives, {n} entries.'
+            f'{len(self.sdat.seqarc_list)} sequence archives, {n} entries, '
+            f'{nseq} music sequences.'
         )
         self.setWindowTitle(f'DualRip - {os.path.basename(path)}')
 
@@ -253,15 +259,17 @@ class MainWindow(QMainWindow):
             top.setText(2, f'{playable} entries')
             cat_arcs.addChild(top)
         self.tree.addTopLevelItem(cat_arcs)
-        cat_arcs.setExpanded(True)
 
         seqs = self.sdat.sequence_list
         cat_seq = QTreeWidgetItem(['Sequences (SSEQ)', '', f'{len(seqs)}'])
-        cat_seq.setData(0, ROLE_KIND, 'cat')
+        cat_seq.setData(0, ROLE_KIND, 'seqcat')
         for sid, name, bank_id in seqs:
-            it = QTreeWidgetItem(
-                [name, str(sid), f'bank {bank_id}' if bank_id is not None else '']
-            )
+            bank = ''
+            if bank_id is not None:
+                bank = f'bank {bank_id}'
+                if self.sdat.bank_is_null(bank_id):
+                    bank += ' (auto)'
+            it = QTreeWidgetItem([name, str(sid), bank])
             it.setData(0, ROLE_KIND, 'seq')
             it.setData(0, ROLE_INDEX, sid)
             cat_seq.addChild(it)
@@ -317,21 +325,28 @@ class MainWindow(QMainWindow):
             if text and vis:
                 top.setExpanded(True)
 
-    def _current_entry(self):
+    def _current_playable(self):
+        """(seqarc, entry) for the current tree item if it is renderable (an
+        SSAR entry or a standalone SSEQ), else (None, None). A sequence is a
+        one-entry synthetic SeqArc, so both share every downstream path."""
         it = self.tree.currentItem()
-        if it is None or it.data(0, ROLE_KIND) != 'entry':
+        if it is None or self.sdat is None:
             return None, None
-        arc_id = it.data(0, ROLE_ARC)
-        index = it.data(0, ROLE_INDEX)
-        seqarc = self.sdat.seqarc(arc_id)
-        return seqarc, seqarc.entries[index]
+        kind = it.data(0, ROLE_KIND)
+        if kind == 'entry':
+            seqarc = self.sdat.seqarc(it.data(0, ROLE_ARC))
+            return seqarc, seqarc.entries[it.data(0, ROLE_INDEX)]
+        if kind == 'seq':
+            seqarc = self.sdat.sequence(it.data(0, ROLE_INDEX))
+            return seqarc, seqarc.entries[0]
+        return None, None
 
     def _selection_changed(self, *_):
         it = self.tree.currentItem()
         if it is None or self.sdat is None:
             return
         kind = it.data(0, ROLE_KIND)
-        self.player.setVisible(kind == 'entry')
+        self.player.setVisible(kind in ('entry', 'seq'))
         for lbl in (
             self.lbl_bank,
             self.lbl_volume,
@@ -340,11 +355,17 @@ class MainWindow(QMainWindow):
             self.lbl_status,
         ):
             lbl.setText('-')
-        if kind == 'entry':
-            seqarc, entry = self._current_entry()
+        if kind in ('entry', 'seq'):
+            seqarc, entry = self._current_playable()
             self.lbl_name.setText(entry.name)
-            self.lbl_kind.setText('Sound effect (SSAR entry)')
-            self.lbl_where.setText(f'{seqarc.arc_id:03d}  {seqarc.name}  [{entry.index}]')
+            if kind == 'entry':
+                self.lbl_kind.setText('Sound effect (SSAR entry)')
+                self.lbl_where.setText(
+                    f'{seqarc.arc_id:03d}  {seqarc.name}  [{entry.index}]'
+                )
+            else:
+                self.lbl_kind.setText('Music sequence (SSEQ)')
+                self.lbl_where.setText(f'sequence {entry.index}')
             bank = str(entry.bank_id)
             bname = self.sdat.bank_name(entry.bank_id)
             if self.sdat.bank_is_null(entry.bank_id):
@@ -361,11 +382,11 @@ class MainWindow(QMainWindow):
             self.lbl_kind.setText('Sequence archive (SSAR)')
             self.lbl_where.setText(f'archive {arc_id:03d}')
             self.lbl_status.setText(it.text(2))
-        elif kind == 'seq':
-            self.lbl_name.setText(it.text(0))
-            self.lbl_kind.setText('Sequence (SSEQ)')
-            self.lbl_where.setText(f'sequence {it.text(1)}')
-            self.lbl_bank.setText(it.text(2) or '-')
+        elif kind == 'seqcat':
+            self.lbl_name.setText('Sequences (SSEQ)')
+            self.lbl_kind.setText('Music sequence collection')
+            self.lbl_where.setText(f'{it.text(2)} sequences')
+            self.lbl_status.setText('select to export all music')
         elif kind == 'bank':
             bid = it.data(0, ROLE_INDEX)
             self.lbl_name.setText(it.text(0))
@@ -432,7 +453,7 @@ class MainWindow(QMainWindow):
         return (self._generation, seqarc.arc_id, entry.index, self.settings['rate'])
 
     def _on_play_clicked(self):
-        seqarc, entry = self._current_entry()
+        seqarc, entry = self._current_playable()
         if (
             entry is not None
             and self.player.loaded_key == self._cache_key(seqarc, entry)
@@ -443,7 +464,7 @@ class MainWindow(QMainWindow):
         self.play_selected()
 
     def play_selected(self):
-        seqarc, entry = self._current_entry()
+        seqarc, entry = self._current_playable()
         if entry is None:
             return
         key = self._cache_key(seqarc, entry)
@@ -491,13 +512,22 @@ class MainWindow(QMainWindow):
                 'Playback unavailable (sounddevice missing or no audio output device).'
             )
 
+    def _evict_cache(self):
+        def total_bytes():
+            return sum(r.audio.nbytes for r in self._cache.values()
+                       if r.audio is not None)
+
+        while len(self._cache) > CACHE_SIZE or (
+            len(self._cache) > 1 and total_bytes() > CACHE_MAX_BYTES
+        ):
+            self._cache.popitem(last=False)
+
     def _preview_done(self, key, res):
         self._finish_preview_worker()
         self._cache[key] = res
         self._cache.move_to_end(key)
-        while len(self._cache) > CACHE_SIZE:
-            self._cache.popitem(last=False)
-        cur_arc, cur_entry = self._current_entry()
+        self._evict_cache()
+        cur_arc, cur_entry = self._current_playable()
         if cur_entry is not None and self._cache_key(cur_arc, cur_entry) == key:
             self._show_render(res)
         if self._preview_pending is not None:
@@ -515,9 +545,12 @@ class MainWindow(QMainWindow):
         self._start_pending_preview()
 
     def _selected_jobs(self):
-        """Build [(arc_id, only_set_or_None)] from the tree selection."""
+        """Build tagged jobs [(kind, ident, sel)] from the tree selection.
+        'arc'/'entry' -> SSAR jobs; 'seq'/'seqcat' -> one SSEQ music job."""
         whole = set()
         partial = {}
+        seq_ids = set()
+        all_seqs = False
         for it in self.tree.selectedItems():
             kind = it.data(0, ROLE_KIND)
             if kind == 'arc':
@@ -525,8 +558,17 @@ class MainWindow(QMainWindow):
             elif kind == 'entry':
                 arc = it.data(0, ROLE_ARC)
                 partial.setdefault(arc, set()).add(it.data(0, ROLE_INDEX))
-        jobs = [(a, None) for a in sorted(whole)]
-        jobs += [(a, idxs) for a, idxs in sorted(partial.items()) if a not in whole]
+            elif kind == 'seq':
+                seq_ids.add(it.data(0, ROLE_INDEX))
+            elif kind == 'seqcat':
+                all_seqs = True
+        jobs = [('arc', a, None) for a in sorted(whole)]
+        jobs += [('arc', a, idxs) for a, idxs in sorted(partial.items())
+                 if a not in whole]
+        if all_seqs:
+            jobs.append(('seq', None, None))
+        elif seq_ids:
+            jobs.append(('seq', None, seq_ids))
         return jobs
 
     def export_selection(self):
@@ -535,13 +577,17 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 'DualRip',
-                'Select entries or archives first (Ctrl/Shift-click for multiple).',
+                'Select entries, archives or sequences first '
+                '(Ctrl/Shift-click for multiple).',
             )
             return
         self._open_export(jobs)
 
     def export_all(self):
-        self._open_export([(i, None) for i, _n, _c in self.sdat.seqarc_list])
+        jobs = [('arc', i, None) for i, _n, _c in self.sdat.seqarc_list]
+        if self.sdat.sequence_list:
+            jobs.append(('seq', None, None))
+        self._open_export(jobs)
 
     def _open_export(self, jobs):
         self.settings = load_settings()
@@ -567,7 +613,7 @@ class MainWindow(QMainWindow):
             self,
             'About DualRip',
             f'<b>DualRip {__version__}</b><br>'
-            'Nintendo DS SDAT sound-effect (SSAR) ripper.<br><br>'
+            'Nintendo DS SDAT sound-effect (SSAR) and music (SSEQ) ripper.<br><br>'
             'Playback core is a Python port of the FeOS Sound System '
             '(fincs), as adapted by Naram Qashat (CyberBotX) for the NCSF '
             'player (in_xsf). Driver tables originate from disassembly of '
