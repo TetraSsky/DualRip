@@ -78,8 +78,7 @@ class SdatFile:
             entries = []
             for idx, (sname, seq) in enumerate(arc.sequences):
                 if seq is None or seq.firstEventOffset is None:
-                    entries.append(SeqArcEntry(idx, sname or f'SEQ_{idx}',
-                                               None, None, None, None))
+                    entries.append(SeqArcEntry(idx, sname or f'SEQ_{idx}', None, None, None, None))
                 else:
                     entries.append(
                         SeqArcEntry(
