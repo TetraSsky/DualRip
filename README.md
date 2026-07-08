@@ -1,6 +1,6 @@
 # DualRip
 
-Rips Nintendo DS sound effects (SSAR) and music (SSEQ) inside `sound_data.sdat` to WAV by emulating the DS sound driver. CLI + GUI.
+Rips Nintendo DS sound effects (SSAR) & music (SSEQ) inside `sound_data.sdat` to WAV by emulating the DS sound driver. CLI + GUI.
 
 ## What you get
 
@@ -9,10 +9,13 @@ Rips Nintendo DS sound effects (SSAR) and music (SSEQ) inside `sound_data.sdat` 
 
 ## Screenshots
 
-Browse the SDAT, preview entries with the built-in player (seek, pause, loop
-on the sound's own loop points):
+Browse the SDAT, preview sound effects with the built-in player (seek, pause, loop on the sound's own loop points):
 
-![Main window](docs/main-window.png)
+![Archive preview](docs/archive-preview.png)
+
+Music sequences with full-length seek bar and live playback:
+
+![Music preview](docs/music-preview.png)
 
 Batch export with per-entry log, loop points and bank auto-resolution notes:
 
