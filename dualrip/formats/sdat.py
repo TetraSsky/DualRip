@@ -35,11 +35,11 @@ class SeqArcEntry:
         self.offset = offset # None for null/placeholder slots
 
 class SeqArc:
-    """A sequence archive: shared event blob + entry table.
+    """
+    Sequence archive: shared event blob + entry table.
 
-    A standalone SSEQ (music) is modelled as a one-entry SeqArc whose arc_id
-    is ('SSEQ', seq_id), so it flows through the same render_one/BankResolver
-    path as SSAR sound effects with no special casing in the engine.
+    Standalone SSEQ is modelled as a one-entry SeqArc with arc_id ('SSEQ', seq_id) — flows through the same render_one / BankResolver
+    Path as SSAR, zero special casing in the engine.
     """
 
     __slots__ = ('arc_id', 'name', 'blob', 'entries')
@@ -50,8 +50,8 @@ class SeqArc:
         self.blob = blob
         self.entries = entries
 
-# SSEQ header's 16 bytes, then DATA. 0x18 holds the offset to the actual song events
-# Playback just starts at the beginning like an SSAR with a 0 offset
+# SSEQ header: 16 bytes, then DATA block. Offset at 0x18 points to song events.
+# Playback starts at blob[0:] like an SSAR with offset 0.
 SSEQ_EVENTS_PTR_OFF = 0x18
 
 class SdatFile:
@@ -110,10 +110,12 @@ class SdatFile:
         return out
 
     def sequence(self, seq_id):
-        """A standalone SSEQ as a one-entry SeqArc (arc_id ('SSEQ', seq_id)),
-        so the SSAR render_one / BankResolver path renders it unchanged. The
-        entry's index is the sequence id (used for file names and manifests);
-        its offset is 0 because a sequence file carries only its own events."""
+        """
+        Standalone SSEQ as a one-entry SeqArc (arc_id=('SSEQ', seq_id)).
+
+        Entry index = seq_id (used for filenames/manifests), offset = 0
+        (SSEQ carries only its own events, no shared blob).
+        """
         if seq_id not in self._seq_cache:
             name, seq = self._sdat.sequences[seq_id]
             if seq is None:
@@ -160,8 +162,7 @@ class SdatFile:
         return not 0 <= bid < len(self._sdat.banks) or self._sdat.banks[bid][1] is None
 
     def _bank_slot_ids(self, bnk):
-        """The bank's wave archive ids, normalized to exactly
-        BANK_WAVE_ARCHIVE_SLOTS entries with None for empty/invalid slots."""
+        """Wave archive IDs for this bank, normalized to BANK_WAVE_ARCHIVE_SLOTS entries (None = empty/invalid/NO_WAVE_ARCHIVE sentinel)."""
         wids = []
         for wid in list(bnk.waveArchiveIDs)[:BANK_WAVE_ARCHIVE_SLOTS]:
             if (
@@ -177,8 +178,7 @@ class SdatFile:
         return wids
 
     def bank_meta(self, bid):
-        """(patch entries, wave counts per slot, wave archive ids) without
-        decoding any sample, or None for a null bank."""
+        """Return (patch entries, wave counts per slot, wave archive ids) without decoding samples. None for null banks."""
         if bid not in self._meta_cache:
             if self.bank_is_null(bid):
                 self._meta_cache[bid] = None

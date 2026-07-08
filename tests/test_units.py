@@ -1,4 +1,6 @@
-"""Unit tests for the fidelity-critical primitives (no game data needed)."""
+"""
+Unit tests for the fidelity-critical primitives (no game data needed).
+"""
 
 from dualrip.cprims import (
     cdiv,
@@ -20,12 +22,12 @@ def test_cdiv_truncates_toward_zero():
     assert cdiv(-7, 2) == -3
     assert cdiv(7, -2) == -3
     assert cdiv(7, 2) == 3
-    assert cdiv(-92544 * 255, 256) == -92182  # attack envelope first step
+    assert cdiv(-92544 * 255, 256) == -92182 # attack envelope first step
 
 
 def test_sign_casts():
-    assert s8(0xF4) == -12  # real SSEQ TRANSPOSE byte (244, wraps to -12)
-    assert s16(0xFB40) == -1216  # tie sweep glide
+    assert s8(0xF4) == -12 # real SSEQ TRANSPOSE byte (244, wraps to -12)
+    assert s16(0xFB40) == -1216 # tie sweep glide
 
 
 def test_muldiv7_passthrough_at_127():
@@ -34,8 +36,8 @@ def test_muldiv7_passthrough_at_127():
 
 
 def test_envelope_conversions():
-    assert cnv_attack(127) == 0  # instant attack
-    assert cnv_attack(0) == 0xFF  # slowest
+    assert cnv_attack(127) == 0 # instant attack
+    assert cnv_attack(0) == 0xFF # slowest
     assert cnv_fall(0x7F) == 0xFFFF
     assert cnv_fall(0x7E) == 0x3C00
     assert cnv_sust(127) == 0
@@ -44,8 +46,8 @@ def test_envelope_conversions():
 
 
 def test_tables_shape():
-    assert len(GETPITCHTBL) == 768  # 12 semitones * 64 steps
-    assert len(GETVOLTBL) == 724  # AMPL_K + 1
+    assert len(GETPITCHTBL) == 768 # 12 semitones * 64 steps
+    assert len(GETVOLTBL) == 724 # AMPL_K + 1
 
 
 def test_timer_adjust_identity_and_octave():

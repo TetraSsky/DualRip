@@ -1,12 +1,6 @@
-# Part of DualRip. Core playback logic is a faithful Python port of the FeOS
-# Sound System (fincs), as adapted by Naram Qashat (CyberBotX) for the NCSF
-# player (github.com/CyberBotX/in_xsf, src/in_ncsf/SSEQPlayer). Lookup tables
-# come from disassembly of Nintendo's NNS sound driver by those authors.
-# FIDELITY-CRITICAL: C integer semantics (truncating division, arithmetic
-# shifts, table indexing) are intentional. Do not "simplify".
-
-# Auto-generated from CyberBotX/in_xsf SSEQPlayer sources (FeOS Sound System tables,
-# themselves obtained from disassembly of Nintendo's NNS sound driver). Do not edit.
+# Part of DualRip. Lookup tables from FeOS Sound System (fincs) / CyberBotX/in_xsf,
+# derived from Nintendo NNS driver disassembly. FIDELITY-CRITICAL: do not edit.
+# C integer semantics (truncating division, arithmetic shifts) are intentional.
 
 GETPITCHTBL = (
     0, 59, 118, 178, 237, 296, 356, 415,

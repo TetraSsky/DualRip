@@ -8,7 +8,7 @@
 from .tables import GETPITCHTBL, ATTACK_LUT, SCALE_LUT, SUST_LUT, SINE_LUT
 
 ARM7_CLOCK = 33513982
-SECONDS_PER_CLOCK = 64.0 * 2728.0 / ARM7_CLOCK  # ~1/192.03 s, hardware driver rate
+SECONDS_PER_CLOCK = 64.0 * 2728.0 / ARM7_CLOCK # ~1/192.03 s, hardware driver rate
 AMPL_K = 723
 AMPL_THRESHOLD = -AMPL_K * 128
 
@@ -39,14 +39,17 @@ def s16(x):
     return ((x + 0x8000) & 0xFFFF) - 0x8000
 
 def muldiv7(val, mul):
+    """Fixed-point multiply: (val * mul) / 128, with mul=127 as identity."""
     return val if mul == 127 else (val * mul) >> 7
 
 def cnv_attack(attk):
+    """Convert NNS attack byte to internal step (LUT + linear tail)."""
     if attk & 0x80:
         attk = 0
     return ATTACK_LUT[0x7F - attk] if attk >= 0x6D else 0xFF - attk
 
 def cnv_fall(fall):
+    """Convert NNS decay byte to internal step (piecewise with sentinel values)."""
     if fall & 0x80:
         fall = 0
     if fall == 0x7F:
@@ -58,17 +61,19 @@ def cnv_fall(fall):
     return (0x1E00 // (0x7E - fall)) & 0xFFFF
 
 def cnv_scale(scale):
+    """Convert NNS scale byte via LUT."""
     if scale & 0x80:
         scale = 0x7F
     return SCALE_LUT[scale]
 
 def cnv_sust(sust):
+    """Convert NNS sustain byte via LUT."""
     if sust & 0x80:
         sust = 0x7F
     return SUST_LUT[sust]
 
 def cnv_sine(arg):
-    # quarter-wave table, full period = 128 steps
+    """Quarter-wave sine LUT lookup (128-step period)."""
     arg &= 0x7F
     if arg <= 32:
         return SINE_LUT[arg]
@@ -79,7 +84,11 @@ def cnv_sine(arg):
     return -SINE_LUT[128 - arg]
 
 def timer_adjust(basetmr, pitch):
-    """Ported from disassembly of Nintendo's sound driver."""
+    """
+    Hardware timer reload value from base timer + pitch bend.
+
+    Ported from NNS driver disassembly. Returns 0xFFFF on overflow, 0x10 floor.
+    """
     shift = 0
     pitch = -pitch
     while pitch < 0:
@@ -105,4 +114,5 @@ def timer_adjust(basetmr, pitch):
     return tmr
 
 def calc_voldiv_shift(x):
+    """Volume divider shift for channel mixing (clamped to 4)."""
     return x if x < 3 else 4

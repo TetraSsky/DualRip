@@ -30,19 +30,20 @@ from ..formats.sdat import SdatFile
 from . import audio
 from .dialogs import ExportDialog, SettingsDialog, load_settings
 from .player import PlayerBar
-from .workers import RenderWorker
+from .workers import LiveWorker, StreamWorker
 
 CACHE_SIZE = 48
 # Music renders are large (a 4-minute song is ~40 MB at 44.1 kHz stereo), so
 # the preview cache is also bounded by total audio bytes, not just count.
+# A 4-min song ≈ 40 MB at 44.1 kHz stereo int16 — cap cache by bytes too.
 CACHE_MAX_BYTES = 256 * 1024 * 1024
 
 # --- layout constants ---
-FORM_HSPACING = 32   # horizontal gap between label and value in the details panel
-SPLITTER_LEFT = 580   # initial left-panel width
-SPLITTER_RIGHT = 440  # initial right-panel width
-TREE_COL_NAME = 330   # "Name" column width in the tree
-TREE_COL_ID = 46      # "ID" column width in the tree
+FORM_HSPACING = 32 # horizontal gap between label and value in the details panel
+SPLITTER_LEFT = 580 # initial left-panel width
+SPLITTER_RIGHT = 440 # initial right-panel width
+TREE_COL_NAME = 330 # "Name" column width in the tree
+TREE_COL_ID = 46 # "ID" column width in the tree
 
 # ROLE_KIND: 'cat' | 'seqcat' | 'arc' | 'entry' | 'seq' | 'bank' | 'war'
 # 'seqcat' is the Sequences category node; selecting it exports all music.
@@ -62,10 +63,10 @@ class MainWindow(QMainWindow):
         self.sdat_path = None
         self.settings = load_settings()
         self._resolvers = {}
-        self._cache = OrderedDict()  # (arc_id, index, rate) -> RenderResult
-        self._preview_worker = None  # in-flight RenderWorker (one at a time)
-        self._preview_pending = None  # (seqarc, entry) requested meanwhile
-        self._generation = 0  # bumped per SDAT so stale renders miss
+        self._cache = OrderedDict() # (arc_id, index, rate) -> RenderResult
+        self._preview_worker = None # in-flight StreamWorker (one at a time)
+        self._preview_key = None # key of the active stream (stale-signal guard)
+        self._generation = 0 # bumped per SDAT so stale renders miss
 
         self._build_menu()
         self._build_ui()
@@ -210,10 +211,10 @@ class MainWindow(QMainWindow):
             return
         try:
             QApplication.setOverrideCursor(Qt.WaitCursor)
+            self._cancel_preview()
             self.sdat = SdatFile(path)
             self.sdat_path = path
             self._generation += 1
-            self._preview_pending = None
             self._resolvers.clear()
             self._cache.clear()
             self.player.clear()
@@ -280,9 +281,7 @@ class MainWindow(QMainWindow):
         cat_bank.setData(0, ROLE_KIND, 'cat')
         for bid, name, wids in banks:
             if wids is None:
-                it = QTreeWidgetItem(
-                    [name or '(null / dynamic slot)', str(bid), 'filled at runtime']
-                )
+                it = QTreeWidgetItem([name or '(null / dynamic slot)', str(bid), 'filled at runtime'])
             else:
                 shown = ', '.join(str(w) for w in wids if w is not None)
                 it = QTreeWidgetItem([name, str(bid), f'wave archives {shown}'])
@@ -326,9 +325,7 @@ class MainWindow(QMainWindow):
                 top.setExpanded(True)
 
     def _current_playable(self):
-        """(seqarc, entry) for the current tree item if it is renderable (an
-        SSAR entry or a standalone SSEQ), else (None, None). A sequence is a
-        one-entry synthetic SeqArc, so both share every downstream path."""
+        """Return (seqarc, entry) for current item if renderable (SSAR entry or standalone SSEQ), else (None, None). SSEQ > synthetic one-entry SeqArc, same downstream path as SSAR."""
         it = self.tree.currentItem()
         if it is None or self.sdat is None:
             return None, None
@@ -360,18 +357,16 @@ class MainWindow(QMainWindow):
             self.lbl_name.setText(entry.name)
             if kind == 'entry':
                 self.lbl_kind.setText('Sound effect (SSAR entry)')
-                self.lbl_where.setText(
-                    f'{seqarc.arc_id:03d}  {seqarc.name}  [{entry.index}]'
-                )
+                self.lbl_where.setText(f'{seqarc.arc_id:03d}  {seqarc.name}  [{entry.index}]')
             else:
                 self.lbl_kind.setText('Music sequence (SSEQ)')
                 self.lbl_where.setText(f'sequence {entry.index}')
             bank = str(entry.bank_id)
             bname = self.sdat.bank_name(entry.bank_id)
             if self.sdat.bank_is_null(entry.bank_id):
-                bank += '  (dynamic slot, resolved automatically)'
+                bank += ' (dynamic slot, resolved automatically)'
             elif bname:
-                bank += f'  {bname}'
+                bank += f' {bname}'
             self.lbl_bank.setText(bank)
             self.lbl_volume.setText(str(entry.volume))
             self._show_render(self._cache.get(self._cache_key(seqarc, entry)))
@@ -393,12 +388,7 @@ class MainWindow(QMainWindow):
             self.lbl_kind.setText('Instrument bank (SBNK)')
             self.lbl_where.setText(f'bank {bid}')
             if self.sdat.bank_is_null(bid):
-                self.lbl_bank.setText(
-                    'NULL slot - filled at runtime by the '
-                    'game; use Settings > Bank map to pin '
-                    'a substitute, or let auto-resolution '
-                    'pick one per entry'
-                )
+                self.lbl_bank.setText('NULL slot - filled at runtime by the game; use Settings > Bank map to pin a substitute, or let auto-resolution pick one per entry')
             else:
                 meta = self.sdat.bank_meta(bid)
                 if meta:
@@ -406,9 +396,7 @@ class MainWindow(QMainWindow):
                     names = []
                     for w in wids:
                         if w is not None:
-                            wn = next(
-                                (n for i, n, _c2 in self.sdat.wave_archive_list if i == w), str(w)
-                            )
+                            wn = next((n for i, n, _c2 in self.sdat.wave_archive_list if i == w), str(w))
                             names.append(f'{w} ({wn})')
                     self.lbl_bank.setText('wave archives: ' + (', '.join(names) or 'none'))
         elif kind == 'war':
@@ -432,10 +420,10 @@ class MainWindow(QMainWindow):
             self.lbl_loop.setText(f'{res.loop_start:.3f}s - {res.loop_end:.3f}s')
         else:
             self.lbl_loop.setText('none')
-        self.lbl_status.setText(res.status + (f' ({res.error})' if res.error else ''))
+        self.lbl_status.setText(res.status + (f'({res.error})' if res.error else ''))
         if res.bank_label and '->' in res.bank_label:
             self.lbl_bank.setText(
-                self.lbl_bank.text().split('  (')[0] + f'  (auto: {res.bank_label})'
+                self.lbl_bank.text().split('(')[0] + f'(auto: {res.bank_label})'
             )
 
     def _override_map(self):
@@ -454,11 +442,19 @@ class MainWindow(QMainWindow):
 
     def _on_play_clicked(self):
         seqarc, entry = self._current_playable()
-        if (
-            entry is not None
-            and self.player.loaded_key == self._cache_key(seqarc, entry)
-            and (audio.state() == audio.PAUSED or audio.position() > 0)
-        ):
+        if entry is None:
+            return
+        same = self.player.loaded_key == self._cache_key(seqarc, entry)
+        if same and audio.is_live():
+            st = audio.state()
+            if st == audio.PLAYING:
+                return
+            if st == audio.PAUSED:
+                self.player.resume()
+                return
+            self.play_selected() # stopped / ended: restart fresh
+            return
+        if same and (audio.state() == audio.PAUSED or audio.position() > 0):
             self.player.resume()
             return
         self.play_selected()
@@ -467,37 +463,74 @@ class MainWindow(QMainWindow):
         seqarc, entry = self._current_playable()
         if entry is None:
             return
+        it = self.tree.currentItem()
+        kind = it.data(0, ROLE_KIND) if it is not None else None
         key = self._cache_key(seqarc, entry)
+        if kind == 'seq':
+            self._play_music_live(key, seqarc, entry)
+            return
         cached = self._cache.get(key)
         if cached is not None:
+            self._cancel_preview()
             self._show_render(cached)
             if cached.audio is not None:
                 self._play(key, cached)
             else:
                 self.statusBar().showMessage(
                     f'{cached.name}: {cached.status}'
-                    + (f' ({cached.error})' if cached.error else '')
+                    + (f'({cached.error})' if cached.error else '')
                 )
             return
-        audio.stop()
-
-        self._preview_pending = (seqarc, entry)
+        self._cancel_preview()
+        audio.unload()
         self.statusBar().showMessage(f'Rendering {entry.name}...')
-        self._start_pending_preview()
-
-    def _start_pending_preview(self):
-        if self._preview_worker is not None or self._preview_pending is None:
-            return
-        seqarc, entry = self._preview_pending
-        self._preview_pending = None
-        key = self._cache_key(seqarc, entry)
-        worker = RenderWorker(
+        worker = StreamWorker(
             key, self.sdat, seqarc, entry, self.settings['rate'], self._resolver(seqarc)
         )
         worker.done.connect(self._preview_done)
         worker.failed.connect(self._preview_failed)
         self._preview_worker = worker
+        self._preview_key = key
+        self.player.begin_stream(key, self.settings['rate'])
         worker.start()
+
+    def _play_music_live(self, key, seqarc, entry):
+        """Start seamless live music preview (LiveWorker). Playback near-instant, whole track seekable, audio not cached (only metadata once racer reports)."""
+        self._cancel_preview()
+        audio.unload()
+        self.statusBar().showMessage(f'Rendering {entry.name}...')
+        worker = LiveWorker(
+            key, self.sdat, seqarc, entry, self.settings['rate'], self._resolver(seqarc)
+        )
+        worker.meta.connect(self._music_meta)
+        worker.failed.connect(self._preview_failed)
+        self._preview_worker = worker
+        self._preview_key = key
+        self.player.begin_live(key, self.settings['rate'])
+        worker.start()
+
+    def _music_meta(self, key, res):
+        """LiveWorker reported exact length/loops (audio already playing, res.audio=None). Non-terminal: worker keeps running."""
+        if key != self._preview_key:
+            return
+        self._cache[key] = res
+        self._cache.move_to_end(key)
+        self._evict_cache()
+        cur_arc, cur_entry = self._current_playable()
+        if cur_entry is not None and self._cache_key(cur_arc, cur_entry) == key:
+            self._show_render(res)
+            if res.status in ('ok', 'loop'):
+                self.statusBar().showMessage(f'{res.name}: {res.duration:.2f}s')
+            else:
+                self.statusBar().showMessage( f'{res.name}: {res.status}' + (f'({res.error})' if res.error else ''))
+
+    def _cancel_preview(self):
+        """Cancel + join in-flight worker. Returns quickly (worker checks cancel flag between chunks/pacing sleeps)."""
+        worker, self._preview_worker = self._preview_worker, None
+        self._preview_key = None
+        if worker is not None:
+            worker.cancel()
+            worker.wait()
 
     def _finish_preview_worker(self):
         worker, self._preview_worker = self._preview_worker, None
@@ -508,45 +541,44 @@ class MainWindow(QMainWindow):
         if self.player.load_result(key, res, self.settings['rate']):
             self.statusBar().showMessage(f'{res.name}: {res.duration:.2f}s')
         else:
-            self.statusBar().showMessage(
-                'Playback unavailable (sounddevice missing or no audio output device).'
-            )
+            self.statusBar().showMessage('Playback unavailable (sounddevice missing or no audio output device).')
 
     def _evict_cache(self):
         def total_bytes():
             return sum(r.audio.nbytes for r in self._cache.values()
-                       if r.audio is not None)
+            if r.audio is not None)
 
-        while len(self._cache) > CACHE_SIZE or (
-            len(self._cache) > 1 and total_bytes() > CACHE_MAX_BYTES
-        ):
+        while len(self._cache) > CACHE_SIZE or (len(self._cache) > 1 and total_bytes() > CACHE_MAX_BYTES):
             self._cache.popitem(last=False)
 
     def _preview_done(self, key, res):
+        if key != self._preview_key:
+            return
         self._finish_preview_worker()
+        self._preview_key = None
         self._cache[key] = res
         self._cache.move_to_end(key)
         self._evict_cache()
         cur_arc, cur_entry = self._current_playable()
         if cur_entry is not None and self._cache_key(cur_arc, cur_entry) == key:
             self._show_render(res)
-        if self._preview_pending is not None:
-            self._start_pending_preview()
-        elif res.audio is not None:
-            self._play(key, res)
-        else:
-            self.statusBar().showMessage(
-                f'{res.name}: {res.status}' + (f' ({res.error})' if res.error else '')
-            )
+            if res.audio is None:
+                self.statusBar().showMessage(
+                    f'{res.name}: {res.status}'
+                    + (f'({res.error})' if res.error else '')
+                )
+            else:
+                self.statusBar().showMessage(f'{res.name}: {res.duration:.2f}s')
 
-    def _preview_failed(self, _key, msg):
+    def _preview_failed(self, key, msg):
+        if key != self._preview_key:
+            return
         self._finish_preview_worker()
+        self._preview_key = None
         self.statusBar().showMessage(f'Render failed: {msg}')
-        self._start_pending_preview()
 
     def _selected_jobs(self):
-        """Build tagged jobs [(kind, ident, sel)] from the tree selection.
-        'arc'/'entry' -> SSAR jobs; 'seq'/'seqcat' -> one SSEQ music job."""
+        """Build tagged jobs [(kind, ident, sel)] from tree selection. 'arc'/'entry' > SSAR jobs; 'seq'/'seqcat' > one SSEQ music job."""
         whole = set()
         partial = {}
         seq_ids = set()
@@ -564,7 +596,7 @@ class MainWindow(QMainWindow):
                 all_seqs = True
         jobs = [('arc', a, None) for a in sorted(whole)]
         jobs += [('arc', a, idxs) for a, idxs in sorted(partial.items())
-                 if a not in whole]
+            if a not in whole]
         if all_seqs:
             jobs.append(('seq', None, None))
         elif seq_ids:
@@ -575,10 +607,8 @@ class MainWindow(QMainWindow):
         jobs = self._selected_jobs()
         if not jobs:
             QMessageBox.information(
-                self,
-                'DualRip',
-                'Select entries, archives or sequences first '
-                '(Ctrl/Shift-click for multiple).',
+                self,'DualRip',
+                'Select entries, archives or sequences first (Ctrl/Shift-click for multiple).',
             )
             return
         self._open_export(jobs)
@@ -603,6 +633,7 @@ class MainWindow(QMainWindow):
                 old['rate'] != self.settings['rate']
                 or old['bank_map'] != self.settings['bank_map']
             ):
+                self._cancel_preview()
                 self._cache.clear()
                 self._resolvers.clear()
                 self.player.clear()
@@ -610,16 +641,13 @@ class MainWindow(QMainWindow):
 
     def show_about(self):
         QMessageBox.about(
-            self,
-            'About DualRip',
+            self,'About DualRip',
             f'<b>DualRip {__version__}</b><br>'
             'Nintendo DS SDAT sound-effect (SSAR) and music (SSEQ) ripper.<br><br>'
-            'Playback core is a Python port of the FeOS Sound System '
-            '(fincs), as adapted by Naram Qashat (CyberBotX) for the NCSF '
-            'player (in_xsf). Driver tables originate from disassembly of '
-            "Nintendo's NNS sound driver by those authors.",
+            'Playback core is a Python port of the FeOS Sound System (fincs), as adapted by Naram Qashat (CyberBotX) for the NCSF player (in_xsf). Driver tables originate from disassembly of Nintendo\'s NNS sound driver by those authors.',
         )
 
     def closeEvent(self, event):
+        self._cancel_preview()
         audio.shutdown()
         event.accept()

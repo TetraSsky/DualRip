@@ -1,5 +1,5 @@
 """
-DualRip -- Nintendo DS SDAT sound-effect (SSAR) ripper.
+DualRip -- Nintendo DS SDAT sound-effect (SSAR & SSEQ) ripper.
 """
 
 __version__ = '2.1.1'

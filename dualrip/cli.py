@@ -15,9 +15,9 @@ from .formats.sdat import SdatFile
 
 def _print_summary(summary):
     if summary['note']:
-        print(f"  note: {summary['note']} (--bank-map overrides this)")
+        print(f"note: {summary['note']} (--bank-map overrides this)")
     line = (
-        f"  -> {summary['ok'] + summary['loop']} WAV written "
+        f"-> {summary['ok'] + summary['loop']} WAV written "
         f"({summary['loop']} looping), {summary['empty']} empty"
     )
     if summary['error']:
@@ -26,14 +26,14 @@ def _print_summary(summary):
 
 def _progress(done, total, res):
     if res.status == 'empty':
-        print(f'  [{res.index:3d}] {res.name}: EMPTY')
+        print(f'[{res.index:3d}] {res.name}: EMPTY')
     elif res.status == 'error':
-        print(f'  [{res.index:3d}] {res.name}: ERROR {res.error}')
+        print(f'[{res.index:3d}] {res.name}: ERROR {res.error}')
     elif res.index % 25 == 0:
-        print(f'  [{res.index:3d}] {res.name}: {res.duration:.2f}s {res.status}')
+        print(f'[{res.index:3d}] {res.name}: {res.duration:.2f}s {res.status}')
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(prog='dualrip', description='Rip Nintendo DS SDAT sound effects (SSAR) and music (SSEQ) to WAV, in raw form (one loop iteration, native silences, full releases, loop points in manifest + smpl chunk).',)
+    ap = argparse.ArgumentParser(prog='dualrip', description='Rip Nintendo DS SDAT (SSAR + SSEQ) to WAV — raw export, one loop iteration, loop points in manifest + smpl chunk.',)
     ap.add_argument('--sdat', required=True, help='path to sound_data.sdat')
     ap.add_argument('--archive', default=None, help='SSAR index, or "all" (sound effects). Default "all" when --sequence is not given',)
     ap.add_argument('--sequence', nargs='+', default=None, metavar='N', help='SSEQ indices, or "all" (music). Extracts music into an SSEQ/ subfolder',)

@@ -1,9 +1,6 @@
-# Part of DualRip. Core playback logic is a faithful Python port of the FeOS
-# Sound System (fincs), as adapted by Naram Qashat (CyberBotX) for the NCSF
-# player (github.com/CyberBotX/in_xsf, src/in_ncsf/SSEQPlayer). Lookup tables
-# come from disassembly of Nintendo's NNS sound driver by those authors.
-# FIDELITY-CRITICAL: C integer semantics (truncating division, arithmetic
-# shifts, table indexing) are intentional. Do not "simplify".
+# Part of DualRip. Bank resolution — static patch scanner + auto-mapping for
+# NULL/dynamic bank slots via family-affinity + exclusivity-weighted coverage.
+# FIDELITY-CRITICAL: SSEQ bytecode walk must be exact.
 
 from collections import Counter
 from .engine.sequencer import (
@@ -43,7 +40,7 @@ def scan_patches(blob, off):
             elif cmd == SSEQ_CMD_PATCH:
                 v, pc = readvl(blob, pc)
                 out.add(v)
-            elif cmd < SSEQ_NOTE_LIMIT:  # note-on: velocity + varlen length
+            elif cmd < SSEQ_NOTE_LIMIT: # note-on: velocity + varlen length
                 pc += 1
                 _v, pc = readvl(blob, pc)
             elif cmd == SSEQ_CMD_OPEN_TRACK:
@@ -69,9 +66,12 @@ def scan_patches(blob, off):
     return out or {0}
 
 def patch_playable(entries, slot_sizes, p):
-    """True if patch p exists and all its instruments can actually resolve
-    their sample (wave archive slot present and wave index in range).
-    slot_sizes: number of waves in each of the bank's 4 wave archive slots."""
+    """
+    True if patch p resolves all instruments to valid samples.
+
+    Args:
+        slot_sizes: wave count per archive slot in the bank (length <= 4).
+    """
     if p >= len(entries) or not entries[p].record:
         return False
     for inst in entries[p].instruments:
@@ -163,7 +163,7 @@ class BankResolver:
         )
 
     def coverage(self, entry, bid):
-        """Fraction of the entry's instruments playable with bank `bid`."""
+        """Fraction of entry's instruments playable with bank bid."""
         ps = self._entry_ps.get(entry.index)
         if ps is None:
             ps = scan_patches(self.seqarc.blob, entry.offset)
@@ -174,7 +174,7 @@ class BankResolver:
         return sum(1 for p in ps if patch_playable(ent, cnts, p)) / len(ps)
 
     def resolve(self, entry):
-        """Bank id to use for this entry."""
+        """Best bank id for this entry (override > auto-candidate > original)."""
         bid = entry.bank_id
         cands = self.override.get(bid)
         if not cands and bid in self.auto_bids:

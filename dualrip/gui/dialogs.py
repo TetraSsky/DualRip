@@ -24,10 +24,10 @@ from PySide6.QtWidgets import (
 from ..bankmap import parse_bank_map
 from .workers import BatchWorker
 
-RATES = ('32728', '44100', '48000')  # presets; the combo stays editable
+RATES = ('32728', '44100', '48000') # presets; combo stays editable
 RATE_MIN, RATE_MAX = 8000, 192000
 EXPORT_DIALOG_SIZE = (680, 460)
-LOG_MAX_LINES = 20000  # keep huge batches from growing the log unbounded
+LOG_MAX_LINES = 20000 # prevent unbounded log growth on huge batches
 
 def load_settings():
     s = QSettings('DualRip', 'DualRip')
@@ -47,6 +47,7 @@ def save_settings(values):
         s.setValue(k, v)
 
 class SettingsDialog(QDialog):
+    """Output folder, sample rate, bank-map override."""
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle('Settings')
@@ -74,12 +75,7 @@ class SettingsDialog(QDialog):
         self.ed_map.setPlaceholderText('e.g. 4=32+33+43,30=6  (empty = automatic)')
         form.addRow('Bank map override', self.ed_map)
 
-        hint = QLabel(
-            'Bank map replaces the automatic resolution of NULL/'
-            'dynamic bank slots. Candidates separated by "+" are '
-            'tried in order; the first bank able to play all the '
-            "entry's instruments wins."
-        )
+        hint = QLabel('Bank map replaces the automatic resolution of NULL/ dynamic bank slots. Candidates separated by "+" are tried in order; the first bank able to play all the entry\'s instruments wins.')
         hint.setWordWrap(True)
         hint.setStyleSheet('color: gray;')
 
@@ -120,7 +116,8 @@ class SettingsDialog(QDialog):
         self.accept()
 
 class ExportDialog(QDialog):
-    """Confirmation + live log window for a batch export.
+    """
+    Confirmation + live log window for a batch export.
 
     jobs: [(kind, ident, sel)] where kind is 'arc' (ident=arc_id) or 'seq'
     (ident=None); sel is a set of indices/ids or None for the whole thing.
@@ -194,27 +191,19 @@ class ExportDialog(QDialog):
                     seq_names = {sid: name for sid, name, _b in self._sdat.sequence_list}
                 ids = sorted(sel) if sel is not None else self._all_seq_ids()
                 if sel is None:
-                    self.log.appendPlainText(f'  SSEQ (music) - all {len(ids)} sequences')
+                    self.log.appendPlainText(f'SSEQ (music) - all {len(ids)} sequences')
                 else:
-                    self.log.appendPlainText(f'  SSEQ (music) - {len(ids)} sequences:')
+                    self.log.appendPlainText(f'SSEQ (music) - {len(ids)} sequences:')
                     for sid in ids:
-                        self.log.appendPlainText(
-                            f'      [{sid:3d}] {seq_names.get(sid, sid)}'
-                        )
+                        self.log.appendPlainText(f'[{sid:3d}] {seq_names.get(sid, sid)}')
             else:
                 seqarc = self._sdat.seqarc(ident)
                 if sel is None:
-                    self.log.appendPlainText(
-                        f'  {ident:03d} {seqarc.name} - all {len(seqarc.entries)} entries'
-                    )
+                    self.log.appendPlainText(f'{ident:03d} {seqarc.name} - all {len(seqarc.entries)} entries')
                 else:
-                    self.log.appendPlainText(
-                        f'  {ident:03d} {seqarc.name} - {len(sel)} entries:'
-                    )
+                    self.log.appendPlainText(f'{ident:03d} {seqarc.name} - {len(sel)} entries:')
                     for idx in sorted(sel):
-                        self.log.appendPlainText(
-                            f'      [{idx:3d}] {seqarc.entries[idx].name}'
-                        )
+                        self.log.appendPlainText(f'[{idx:3d}] {seqarc.entries[idx].name}')
         self.log.appendPlainText('')
 
     def _browse(self):
@@ -245,7 +234,7 @@ class ExportDialog(QDialog):
         if res.status in ('ok', 'loop'):
             extra = f'{res.duration:7.2f}s'
             if res.loop_start is not None:
-                extra += f'  loop {res.loop_start:.3f}-{res.loop_end:.3f}s'
+                extra += f' loop {res.loop_start:.3f}-{res.loop_end:.3f}s'
             line = f'[{res.index:3d}] {res.name:44s} {res.status:5s} {extra}'
         elif res.status == 'error':
             line = f'[{res.index:3d}] {res.name:44s} ERROR {res.error}'

@@ -3,6 +3,7 @@ Playback bar widget (seek slider, loop toggle, Play/Pause/Stop).
 """
 
 from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QPainter
 from PySide6.QtWidgets import (
     QCheckBox,
     QFrame,
@@ -16,10 +17,36 @@ from PySide6.QtWidgets import (
 )
 from . import audio
 
-POLL_MS = 40  # playhead refresh period
+POLL_MS = 40 # playhead refresh period
 
 class SeekSlider(QSlider):
-    """Slider that seeks to clicked position (default QSlider pages)."""
+    """Slider with click-to-seek + buffered-progress band underneath."""
+
+    def __init__(self, *args):
+        super().__init__(*args)
+        self._buffered_frac = 1.0
+
+    def set_buffered_fraction(self, frac):
+        frac = 0.0 if frac < 0.0 else (1.0 if frac > 1.0 else frac)
+        if abs(frac - self._buffered_frac) > 0.002 or (
+            (frac >= 1.0) != (self._buffered_frac >= 1.0)
+        ):
+            self._buffered_frac = frac
+            self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self._buffered_frac >= 1.0 or self.maximum() <= 0:
+            return
+        opt = QStyleOptionSlider()
+        self.initStyleOption(opt)
+        groove = self.style().subControlRect(
+            QStyle.CC_Slider, opt, QStyle.SC_SliderGroove, self)
+        color = self.palette().highlight().color()
+        color.setAlpha(90)
+        painter = QPainter(self)
+        painter.fillRect(groove.x(), groove.bottom() + 2, int(groove.width() * self._buffered_frac), 2, color)
+        painter.end()
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -94,9 +121,7 @@ class PlayerBar(QFrame):
         marks = None
         if res.loop_start is not None:
             marks = (round(res.loop_start * rate), round(res.loop_end * rate))
-        if not audio.load(res.audio, rate,
-                          marks[0] if marks else None,
-                          marks[1] if marks else None):
+        if not audio.load(res.audio, rate, marks[0] if marks else None, marks[1] if marks else None):
             return False
         self.loaded_key = key
         self._rate = rate
@@ -106,6 +131,24 @@ class PlayerBar(QFrame):
         self._timer.start()
         self._poll()
         return True
+
+    def begin_stream(self, key, rate):
+        """Arm bar for streaming render. Full-track estimate arrives in ~300ms (sequencer-only), then exact total snaps at finalize."""
+        self.loaded_key = key
+        self._rate = rate
+        self.slider.setRange(0, 0)
+        self.slider.set_buffered_fraction(0.0)
+        self._timer.start()
+        self._poll()
+
+    def begin_live(self, key, rate):
+        """Arm bar for live (ring) music render. Whole track seekable from start via checkpoints — no buffered band, drag jumps instantly."""
+        self.loaded_key = key
+        self._rate = rate
+        self.slider.setRange(0, 0)
+        self.slider.set_buffered_fraction(1.0)
+        self._timer.start()
+        self._poll()
 
     def resume(self):
         audio.play()
@@ -127,12 +170,21 @@ class PlayerBar(QFrame):
 
     def _poll(self):
         total = audio.duration()
+        buffered = audio.buffered()
         pos = audio.position()
+        final = audio.is_final()
+        self.slider.setRange(0, max(total - 1, 0))
+        self.slider.set_buffered_fraction(
+            1.0 if final or not total else buffered / total)
         if not self._dragging:
             self.slider.setValue(pos)
-            self.lbl_time.setText(
-                f'{self._fmt(pos)} / {self._fmt(total)} s'
-                if total else '-')
+            if not total:
+                self.lbl_time.setText('-')
+            else:
+                text = f'{self._fmt(pos)} / {self._fmt(total)} s'
+                if not final and pos >= buffered:
+                    text += ' (rendering...)'
+                self.lbl_time.setText(text)
 
     def _drag_started(self):
         self._dragging = True
@@ -143,4 +195,7 @@ class PlayerBar(QFrame):
 
     def _drag_finished(self):
         self._dragging = False
-        audio.seek(self.slider.value())
+        if audio.is_live():
+            audio.request_seek(self.slider.value())
+        else:
+            audio.seek(self.slider.value())

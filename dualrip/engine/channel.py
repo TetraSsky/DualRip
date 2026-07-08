@@ -1,9 +1,6 @@
-# Part of DualRip. Core playback logic is a faithful Python port of the FeOS
-# Sound System (fincs), as adapted by Naram Qashat (CyberBotX) for the NCSF
-# player (github.com/CyberBotX/in_xsf, src/in_ncsf/SSEQPlayer). Lookup tables
-# come from disassembly of Nintendo's NNS sound driver by those authors.
-# FIDELITY-CRITICAL: C integer semantics (truncating division, arithmetic
-# shifts, table indexing) are intentional. Do not "simplify".
+# Part of DualRip. Channel synthesis + ADSR envelopes. Faithful port of FeOS
+# Sound System (fincs) / CyberBotX/in_xsf, derived from NNS driver disassembly.
+# FIDELITY-CRITICAL: C integer semantics, volume/pan arithmetic are intentional.
 
 import numpy as np
 from ..cprims import (
@@ -34,6 +31,7 @@ from ..cprims import (
 from ..tables import GETVOLTBL, WAVEDUTYTBL
 
 class Reg:
+    """Hardware channel registers (mirrors NDS sound controller)."""
     __slots__ = (
         'volumeMul',
         'volumeDiv',
@@ -82,6 +80,7 @@ class Reg:
         self.enable = bool((cr >> 31) & 0x01)
 
 class Channel:
+    """One NDS sound channel: ADSR state machine, sample synthesis, hw mixing."""
     def __init__(self, chn_id, player):
         self.chnId = chn_id
         self.ply = player
@@ -334,8 +333,23 @@ class Channel:
             self.tempCR = cr
             self.reg.set_cr(cr)
 
-    def generate_block(self, n):
-        """Returns (left, right) int64 arrays of n samples, advances channel."""
+    def generate_block(self, n, produce=True):
+        """
+        Advance channel by n samples.
+
+        Args:
+            n: number of samples to advance.
+            produce: if True, return (left, right) int64 arrays. If False,
+                advance the same internal state (sample position, PSG/noise
+                LFSR, loop-pass, kill/loop detection) without synthesizing —
+                used for silent fast-forward in live preview seek.
+
+        Returns:
+            (left, right) int64 ndarrays or None (when produce=False).
+
+        The state path is identical in both modes so checkpoint/seek is
+        bit-exact.
+        """
         reg = self.reg
         inc = reg.sampleIncrease
         pos0 = reg.samplePosition
@@ -344,33 +358,34 @@ class Channel:
         positions = pos0 + inc * np.arange(n, dtype=np.float64)
 
         if reg.format != 3:
-            src = reg.source
-            data = src.data
             totalLen = reg.totalLength
             loopStart = reg.loopStart
             loopLen = reg.length
             fpos = np.floor(positions)
-            idx0 = fpos.astype(np.int64)
-            valid = idx0 >= 0
-            if reg.repeatMode == 1 and loopLen > 0:
-                big = idx0 >= totalLen
-                if big.any():
-                    idx0 = np.where(big, loopStart + (idx0 - loopStart) % loopLen, idx0)
-                idx1 = idx0 + 1
-                big1 = idx1 >= totalLen
-                if big1.any():
-                    idx1 = np.where(big1, loopStart + (idx1 - loopStart) % loopLen, idx1)
-            else:
-                valid &= idx0 < totalLen
-                idx1 = np.minimum(idx0 + 1, totalLen - 1)
-            hi = len(data) - 1
-            idx0c = np.minimum(np.maximum(idx0, 0), hi)
-            idx1c = np.minimum(np.maximum(idx1, 0), hi)
-            d0 = data[idx0c]
-            d1 = data[idx1c]
-            frac = positions - fpos
-            samples = (d0 + frac * (d1 - d0)).astype(np.int64)
-            samples[~valid] = 0
+            if produce:
+                src = reg.source
+                data = src.data
+                idx0 = fpos.astype(np.int64)
+                valid = idx0 >= 0
+                if reg.repeatMode == 1 and loopLen > 0:
+                    big = idx0 >= totalLen
+                    if big.any():
+                        idx0 = np.where(big, loopStart + (idx0 - loopStart) % loopLen, idx0)
+                    idx1 = idx0 + 1
+                    big1 = idx1 >= totalLen
+                    if big1.any():
+                        idx1 = np.where(big1, loopStart + (idx1 - loopStart) % loopLen, idx1)
+                else:
+                    valid &= idx0 < totalLen
+                    idx1 = np.minimum(idx0 + 1, totalLen - 1)
+                hi = len(data) - 1
+                idx0c = np.minimum(np.maximum(idx0, 0), hi)
+                idx1c = np.minimum(np.maximum(idx1, 0), hi)
+                d0 = data[idx0c]
+                d1 = data[idx1c]
+                frac = positions - fpos
+                samples = (d0 + frac * (d1 - d0)).astype(np.int64)
+                samples[~valid] = 0
             if reg.repeatMode == 1 and self.loop_pass_sample is None and inc > 0:
                 # remember when the playhead first enters the loop region
                 if pos0 + inc * n > loopStart:
@@ -382,7 +397,8 @@ class Channel:
                 if past.any():
                     # raw mode: stop an endless looped note after one full
                     # pass through the sample, and record the loop points
-                    samples[past] = 0
+                    if produce:
+                        samples[past] = 0
                     self.kill_after_block = True
                     self.ply.loop_detected = True
                     k = int(np.argmax(past))
@@ -400,17 +416,20 @@ class Channel:
             if reg.repeatMode != 1 and new_pos >= totalLen:
                 self.kill_after_block = True
         elif self.chnId < 8:
-            samples = np.zeros(n, dtype=np.int64)
+            if produce:
+                samples = np.zeros(n, dtype=np.int64)
             reg.samplePosition = pos0 + inc * n
         elif self.chnId < 14:
-            duty = WAVEDUTYTBL[reg.waveDuty * 8 : reg.waveDuty * 8 + 8]
-            duty = np.asarray(duty, dtype=np.int64)
-            idx = np.floor(positions).astype(np.int64)
-            samples = duty[idx & 0x7]
-            samples[idx < 0] = 0
+            if produce:
+                duty = WAVEDUTYTBL[reg.waveDuty * 8 : reg.waveDuty * 8 + 8]
+                duty = np.asarray(duty, dtype=np.int64)
+                idx = np.floor(positions).astype(np.int64)
+                samples = duty[idx & 0x7]
+                samples[idx < 0] = 0
             reg.samplePosition = pos0 + inc * n
         else:
-            samples = np.zeros(n, dtype=np.int64)
+            if produce:
+                samples = np.zeros(n, dtype=np.int64)
             psgX = reg.psgX
             psgLast = reg.psgLast
             psgLastCount = reg.psgLastCount
@@ -428,11 +447,15 @@ class Channel:
                             psgX >>= 1
                             psgLast = 0x7FFF
                     psgLastCount = cur
-                samples[k] = psgLast
+                if produce:
+                    samples[k] = psgLast
             reg.psgX = psgX
             reg.psgLast = psgLast
             reg.psgLastCount = psgLastCount
             reg.samplePosition = pos0 + inc * n
+
+        if not produce:
+            return None
 
         # hardware volume & pan (NCSF GenerateSamples)
         datashift = reg.volumeDiv

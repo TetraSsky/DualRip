@@ -1,9 +1,6 @@
-# Part of DualRip. Core playback logic is a faithful Python port of the FeOS
-# Sound System (fincs), as adapted by Naram Qashat (CyberBotX) for the NCSF
-# player (github.com/CyberBotX/in_xsf, src/in_ncsf/SSEQPlayer). Lookup tables
-# come from disassembly of Nintendo's NNS sound driver by those authors.
-# FIDELITY-CRITICAL: C integer semantics (truncating division, arithmetic
-# shifts, table indexing) are intentional. Do not "simplify".
+# Part of DualRip. SSEQ bytecode interpreter — faithful port of FeOS Sound
+# System (fincs) / CyberBotX/in_xsf, derived from NNS driver disassembly.
+# FIDELITY-CRITICAL: C integer semantics, literal dispatches are intentional.
 
 from ..cprims import (
     CS_NONE,
@@ -37,6 +34,7 @@ from ..cprims import (
 from .channel import Channel
 
 def readvl(blob, pc):
+    """Read variable-length int from SSEQ bytecode, return (value, new_pc)."""
     x = 0
     while True:
         d = blob[pc]
@@ -46,20 +44,18 @@ def readvl(blob, pc):
             break
     return x, pc
 
-# SSEQ bytecode command values needed OUTSIDE the interpreter loop (the
-# static patch scanner in bankmap.py walks the same bytecode). Inside
-# execute_command() below, the full command set is intentionally dispatched
-# on literal values with a naming comment on each branch, mirroring the C
-# reference the port is checked against.
-SSEQ_NOTE_LIMIT = 0x80      # command values below this are note-on events
+# SSEQ opcodes exposed for bankmap.py (static patch scanner).
+# Inside Track.run() the full set is dispatched on literal values with
+# naming comments — intentionally mirrors the C++ reference line-by-line.
+SSEQ_NOTE_LIMIT = 0x80 # command values below this are note-on events
 SSEQ_CMD_PATCH = 0x81
 SSEQ_CMD_OPEN_TRACK = 0x93
 SSEQ_CMD_GOTO = 0x94
 SSEQ_CMD_CALL = 0x95
 SSEQ_CMD_RANDOM = 0xA0
 SSEQ_CMD_FROM_VAR = 0xA1
-SSEQ_VAR_CMD_FIRST = 0xB0   # variable ops / comparisons take a 1-byte
-SSEQ_VAR_CMD_LAST = 0xBD    # argument in Random/FromVariable override mode
+SSEQ_VAR_CMD_FIRST = 0xB0 # variable ops / comparisons take a 1-byte
+SSEQ_VAR_CMD_LAST = 0xBD # argument in Random/FromVariable override mode
 SSEQ_CMD_FIN = 0xFF
 
 VARIABLE_BYTE_COUNT = 1 << 7
@@ -90,6 +86,7 @@ def sseq_command_byte_count(cmd):
     return _CMD_BYTES.get(cmd, 0)
 
 class Rng:
+    """LCG random number generator (seed 0x12345678), matches NNS driver."""
     def __init__(self):
         self.u = 0x12345678
 
@@ -98,6 +95,7 @@ class Rng:
         return (self.u >> 16) & 0xFFFF
 
 class Track:
+    """One SSEQ track: bytecode pointer, state, note-on helpers."""
     __slots__ = (
         'trackId',
         'state',
@@ -243,7 +241,7 @@ class Track:
         self.pos += 3
         return v
 
-    # --- FSS Note_On
+    # --- FSS Note_On --------------------------------------------------
     def note_on(self, key, vel, length, gate=None):
         ply = self.ply
         bank = ply.bank
@@ -294,7 +292,7 @@ class Track:
                     return -1
                 chn = ply.channels[nCh]
                 chn.tempCR = SOUND_FORMAT_PSG | SCHANNEL_ENABLE | ((noteDef.swav & 0x7) << 24)
-            chn.tempTIMER = 0x1000000 // (262 * 8)  # key #60 (C4)
+            chn.tempTIMER = 0x1000000 // (262 * 8) # key #60 (C4)
             chn.reg.samplePosition = -1.0
             chn.reg.psgX = 0x7FFF
             chn.reg.psgLast = 0
@@ -379,7 +377,7 @@ class Track:
             if c.state > CS_NONE and c.trackId == self.trackId and c.state != CS_RELEASE:
                 c.release()
 
-    # --- FSS Track_Run
+    # --- FSS Track_Run ------------------------------------------------
     def run(self):
         self.updateFlags[TF_LEN] = True
         if self.state[TS_END]:
@@ -425,18 +423,18 @@ class Track:
                     if cmd not in (0xA0, 0xA1):
                         self.over_active = False
                     return
-            elif cmd == 0x93:  # OpenTrack
+            elif cmd == 0x93: # OpenTrack
                 tNum = self.read8()
                 trackPos = self.read24()
                 newTrack = self.ply.track_alloc()
                 if newTrack != -1:
                     self.ply.tracks[newTrack].init(newTrack, self.ply, trackPos, tNum)
                     self.ply.trackIds.append(newTrack)
-            elif cmd == 0x80:  # Rest
+            elif cmd == 0x80: # Rest
                 self.wait = self.oval_readvl()
-            elif cmd == 0x81:  # Patch
+            elif cmd == 0x81: # Patch
                 self.patch = self.oval_readvl()
-            elif cmd == 0x94:  # Goto
+            elif cmd == 0x94: # Goto
                 dest = self.read24()
                 if dest in self.visited:
                     # jumping into already-executed code = sequence loop:
@@ -448,48 +446,48 @@ class Track:
                     self.state[TS_END] = True
                     return
                 self.pos = dest
-            elif cmd == 0x95:  # Call
+            elif cmd == 0x95: # Call
                 dest = self.read24()
                 if self.stackPos < 3:
                     self.stack[self.stackPos] = ('call', self.pos)
                     self.stackPos += 1
                     self.pos = dest
-            elif cmd == 0xFD:  # Return
+            elif cmd == 0xFD: # Return
                 if self.stackPos and self.stack[self.stackPos - 1][0] == 'call':
                     self.stackPos -= 1
                     self.pos = self.stack[self.stackPos][1]
-            elif cmd == 0xC0:  # Pan
+            elif cmd == 0xC0: # Pan
                 self.pan = self.oval_read8() - 64
                 self.updateFlags[TF_PAN] = True
-            elif cmd == 0xC1:  # Volume
+            elif cmd == 0xC1: # Volume
                 self.vol = self.oval_read8()
                 self.updateFlags[TF_VOL] = True
-            elif cmd == 0xC2:  # MasterVolume
+            elif cmd == 0xC2: # MasterVolume
                 self.ply.masterVol = cnv_sust(self.oval_read8())
                 for tid in self.ply.trackIds:
                     self.ply.tracks[tid].updateFlags[TF_VOL] = True
-            elif cmd == 0xC6:  # Priority
+            elif cmd == 0xC6: # Priority
                 self.prio = (self.ply.prio + self.read8()) & 0xFF
-            elif cmd == 0xC7:  # NoteWait
+            elif cmd == 0xC7: # NoteWait
                 self.state[TS_NOTEWAIT] = bool(self.read8())
-            elif cmd == 0xC8:  # Tie
+            elif cmd == 0xC8: # Tie
                 self.state[TS_TIE] = bool(self.read8())
                 self.release_all_notes()
-            elif cmd == 0xD5:  # Expression
+            elif cmd == 0xD5: # Expression
                 self.expr = self.oval_read8()
                 self.updateFlags[TF_VOL] = True
-            elif cmd == 0xE1:  # Tempo
+            elif cmd == 0xE1: # Tempo
                 self.ply.tempo = self.read16()
-            elif cmd == 0xFF:  # End
+            elif cmd == 0xFF: # End
                 self.state[TS_END] = True
                 return
-            elif cmd == 0xD4:  # LoopStart
+            elif cmd == 0xD4: # LoopStart
                 value = self.oval_read8()
                 if self.stackPos < 3:
                     self.loopCount[self.stackPos] = value
                     self.stack[self.stackPos] = ('loop', self.pos, self.ply.now_sample)
                     self.stackPos += 1
-            elif cmd == 0xFC:  # LoopEnd
+            elif cmd == 0xFC: # LoopEnd
                 if self.stackPos and self.stack[self.stackPos - 1][0] == 'loop':
                     rPos = self.stack[self.stackPos - 1][1]
                     prevR = self.loopCount[self.stackPos - 1]
@@ -505,48 +503,48 @@ class Track:
                             self.pos = rPos
                         else:
                             self.stackPos -= 1
-            elif cmd == 0xC3:  # Transpose
+            elif cmd == 0xC3: # Transpose
                 self.transpose = s8(self.oval_read8())
-            elif cmd == 0xC4:  # PitchBend
+            elif cmd == 0xC4: # PitchBend
                 self.pitchBend = s8(self.oval_read8())
                 self.updateFlags[TF_TIMER] = True
-            elif cmd == 0xC5:  # PitchBendRange
+            elif cmd == 0xC5: # PitchBendRange
                 self.pitchBendRange = self.read8()
                 self.updateFlags[TF_TIMER] = True
-            elif cmd == 0xD0:  # Attack
+            elif cmd == 0xD0: # Attack
                 self.a = self.oval_read8()
-            elif cmd == 0xD1:  # Decay
+            elif cmd == 0xD1: # Decay
                 self.d = self.oval_read8()
-            elif cmd == 0xD2:  # Sustain
+            elif cmd == 0xD2: # Sustain
                 self.s = self.oval_read8()
-            elif cmd == 0xD3:  # Release
+            elif cmd == 0xD3: # Release
                 self.r = self.oval_read8()
-            elif cmd == 0xC9:  # PortamentoKey
+            elif cmd == 0xC9: # PortamentoKey
                 self.portaKey = (self.read8() + self.transpose) & 0xFF
                 self.state[TS_PORTA] = True
-            elif cmd == 0xCE:  # PortamentoFlag
+            elif cmd == 0xCE: # PortamentoFlag
                 self.state[TS_PORTA] = bool(self.read8())
-            elif cmd == 0xCF:  # PortamentoTime
+            elif cmd == 0xCF: # PortamentoTime
                 self.portaTime = self.oval_read8()
-            elif cmd == 0xE3:  # SweepPitch
+            elif cmd == 0xE3: # SweepPitch
                 self.sweepPitch = s16(self.oval_read16())
                 self.state[TS_PORTA] = True
-            elif cmd == 0xCA:  # ModulationDepth
+            elif cmd == 0xCA: # ModulationDepth
                 self.modDepth = self.oval_read8()
                 self.updateFlags[TF_MOD] = True
-            elif cmd == 0xCB:  # ModulationSpeed
+            elif cmd == 0xCB: # ModulationSpeed
                 self.modSpeed = self.oval_read8()
                 self.updateFlags[TF_MOD] = True
-            elif cmd == 0xCC:  # ModulationType
+            elif cmd == 0xCC: # ModulationType
                 self.modType = self.read8()
                 self.updateFlags[TF_MOD] = True
-            elif cmd == 0xCD:  # ModulationRange
+            elif cmd == 0xCD: # ModulationRange
                 self.modRange = self.read8()
                 self.updateFlags[TF_MOD] = True
-            elif cmd == 0xE0:  # ModulationDelay
+            elif cmd == 0xE0: # ModulationDelay
                 self.modDelay = self.oval_read16()
                 self.updateFlags[TF_MOD] = True
-            elif cmd == 0xA0:  # Random
+            elif cmd == 0xA0: # Random
                 self.over_active = True
                 self.over_cmd = self.read8()
                 if (0xB0 <= self.over_cmd <= 0xBD) or self.over_cmd < 0x80:
@@ -554,15 +552,15 @@ class Track:
                 minVal = s16(self.read16())
                 maxVal = s16(self.read16())
                 self.over_value = (self.ply.rng.calc() % (maxVal - minVal + 1)) + minVal
-                continue  # keep override active
-            elif cmd == 0xA1:  # FromVariable
+                continue # keep override active
+            elif cmd == 0xA1: # FromVariable
                 self.over_active = True
                 self.over_cmd = self.read8()
                 if (0xB0 <= self.over_cmd <= 0xBD) or self.over_cmd < 0x80:
                     self.over_extra = self.read8()
                 self.over_value = self.ply.variables[self.read8() & 0x1F]
-                continue  # keep override active
-            elif 0xB0 <= cmd <= 0xB6 and cmd != 0xB7:  # variable ops
+                continue # keep override active
+            elif 0xB0 <= cmd <= 0xB6 and cmd != 0xB7: # variable ops
                 varNo = s8(self.oval_read8(extra=True)) & 0x1F
                 value = s16(self.oval_read16())
                 var = self.ply.variables[varNo]
@@ -599,7 +597,7 @@ class Track:
                     self.lastComparisonResult = var < value
                 else:
                     self.lastComparisonResult = var != value
-            elif cmd == 0xA2:  # If
+            elif cmd == 0xA2:
                 if not self.lastComparisonResult:
                     nextCmd = self.read8()
                     cmdBytes = sseq_command_byte_count(nextCmd)
@@ -627,6 +625,17 @@ class Track:
                 self.over_active = False
 
 class Player:
+    """
+    SSEQ player: 16 hardware channels, 32 tracks, tempo, LCG RNG.
+
+    Args:
+        blob: SSEQ event bytecode.
+        bank: list of BankEntry (instrument definitions).
+        waveArc: list of 4 decoded wave archives (or None).
+        sample_rate: output sample rate in Hz.
+        sseq_vol: SSEQ master volume (0-127).
+        player_prio: channel-allocation priority base from SDAT cpr field.
+    """
     def __init__(self, blob, bank, waveArc, sample_rate, sseq_vol, player_prio=0):
         self.blob = blob
         self.bank = bank

@@ -1,9 +1,5 @@
-# Part of DualRip. Core playback logic is a faithful Python port of the FeOS
-# Sound System (fincs), as adapted by Naram Qashat (CyberBotX) for the NCSF
-# player (github.com/CyberBotX/in_xsf, src/in_ncsf/SSEQPlayer). Lookup tables
-# come from disassembly of Nintendo's NNS sound driver by those authors.
-# FIDELITY-CRITICAL: C integer semantics (truncating division, arithmetic
-# shifts, table indexing) are intentional. Do not "simplify".
+# Part of DualRip. WAV export + batch rip (SSAR & SSEQ).
+# FIDELITY-CRITICAL: RIFF layout, loop-point embedding, render policy.
 
 import csv
 import os
@@ -143,12 +139,14 @@ def rip_sequences(
     progress=None,
     should_cancel=None,
 ):
-    """Rip standalone SSEQ music sequences to WAV + manifest.csv in an SSEQ/
-    subfolder. Each sequence is a one-entry SeqArc, so it renders through the
-    same render_one path (raw policy, cpr channel priority, loop marks).
+    """
+    Rip standalone SSEQ music > WAV + manifest.csv in SSEQ/ subfolder.
 
-    progress(done, total, RenderResult) called per sequence;
-    should_cancel() -> True aborts cleanly.
+    Each sequence is a one-entry SeqArc > same render_one path (raw policy, cpr channel priority, loop marks).
+
+    Args:
+        progress: callable(done, total, RenderResult) per sequence.
+        should_cancel: callable() > True aborts cleanly.
     """
     out_dir = os.path.join(out_root, 'SSEQ')
     os.makedirs(out_dir, exist_ok=True)

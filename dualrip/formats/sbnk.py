@@ -1,14 +1,13 @@
-# Part of DualRip. Core playback logic is a faithful Python port of the FeOS
-# Sound System (fincs), as adapted by Naram Qashat (CyberBotX) for the NCSF
-# player (github.com/CyberBotX/in_xsf, src/in_ncsf/SSEQPlayer). Lookup tables
-# come from disassembly of Nintendo's NNS sound driver by those authors.
-# FIDELITY-CRITICAL: C integer semantics (truncating division, arithmetic
-# shifts, table indexing) are intentional. Do not "simplify".
+# Part of DualRip. SBNK instrument bank parsing. Ported from FeOS Sound System
+# (fincs) / CyberBotX/in_xsf, derived from NNS driver disassembly.
+# FIDELITY-CRITICAL: C integer semantics are intentional.
 
 import struct
 from .common import NNS_RECORD_COUNT_OFF, NNS_RECORD_TABLE_OFF
 
 class NoteDef:
+    """Single note > sample mapping with ADSR envelope and pan."""
+
     __slots__ = (
         'lowNote',
         'highNote',
@@ -38,9 +37,16 @@ class NoteDef:
             ) = struct.unpack_from('<HH6B', data, off)
 
 class BankEntry:
+    """One bank slot: record type + list of NoteDef."""
+    
     __slots__ = ('record', 'instruments')
 
 def parse_sbnk(data):
+    """
+    Parse SBNK blob into list of BankEntry.
+
+    Record type 16 = key-range, 17 = multi-range, other = single instrument.
+    """
     count = struct.unpack_from('<I', data, NNS_RECORD_COUNT_OFF)[0]
     entries = []
     pos = NNS_RECORD_TABLE_OFF
