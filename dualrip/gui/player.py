@@ -100,10 +100,23 @@ class PlayerBar(QFrame):
         self.btn_stop = QPushButton('Stop', self)
         self.btn_stop.clicked.connect(audio.stop)
         bottom.addWidget(self.btn_play)
-        bottom.addStretch(1)
         bottom.addWidget(self.btn_pause)
-        bottom.addStretch(1)
         bottom.addWidget(self.btn_stop)
+        bottom.addStretch(1)
+
+        self.vol_slider = QSlider(Qt.Horizontal, self)
+        self.vol_slider.setRange(0, 100)
+        self.vol_slider.setValue(int(audio.volume() * 100))
+        self.vol_slider.setFixedWidth(100)
+        self.vol_slider.valueChanged.connect(lambda v: (
+            audio.set_volume(v / 100.0),
+            self.vol_lbl.setText(f'{v}%'),
+        ))
+        self.vol_lbl = QLabel('100%', self)
+        self.vol_lbl.setFixedWidth(36)
+        self.vol_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        bottom.addWidget(self.vol_slider)
+        bottom.addWidget(self.vol_lbl)
 
         lay = QVBoxLayout(self)
         lay.addLayout(top)

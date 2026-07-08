@@ -78,12 +78,16 @@ class MainWindow(QMainWindow):
         act_open.setShortcut(QKeySequence.Open)
         act_open.triggered.connect(self.open_sdat)
         m_file.addAction(act_open)
+        self.act_close_sdat = QAction('&Close SDAT', self)
+        self.act_close_sdat.setShortcut('Ctrl+W')
+        self.act_close_sdat.triggered.connect(self._close_sdat)
+        m_file.addAction(self.act_close_sdat)
         m_file.addSeparator()
         self.act_export_sel = QAction('Export &selection...', self)
         self.act_export_sel.setShortcut('Ctrl+E')
         self.act_export_sel.triggered.connect(self.export_selection)
         m_file.addAction(self.act_export_sel)
-        self.act_export_all = QAction('Export &all archives...', self)
+        self.act_export_all = QAction('Export &all...', self)
         self.act_export_all.triggered.connect(self.export_all)
         m_file.addAction(self.act_export_all)
         m_file.addSeparator()
@@ -196,6 +200,7 @@ class MainWindow(QMainWindow):
         for w in (
             self.act_export_sel,
             self.act_export_all,
+            self.act_close_sdat,
             self.player,
             self.btn_export_sel,
             self.btn_export_all,
@@ -233,6 +238,19 @@ class MainWindow(QMainWindow):
             f'{nseq} music sequences.'
         )
         self.setWindowTitle(f'DualRip - {os.path.basename(path)}')
+
+    def _close_sdat(self):
+        self._cancel_preview()
+        self.sdat = None
+        self.sdat_path = None
+        self._generation += 1
+        self._resolvers.clear()
+        self._cache.clear()
+        self.player.clear()
+        self.tree.clear()
+        self._set_loaded(False)
+        self.setWindowTitle('DualRip')
+        self.statusBar().clearMessage()
 
     def _fill_tree(self):
         self.tree.clear()

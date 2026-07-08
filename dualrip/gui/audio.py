@@ -55,9 +55,10 @@ class _Player:
         self._content_total = 0 # exact total once known, else 0
         self._armed_live = False # auto-start once first block arrives
         self._ended = False # producer reached the natural end (no loop)
-        self._seek_epoch = 0 # bumped on every seek request
-        self._seek_target = None # pending seek (content frame) for the producer
-        self._cond = threading.Condition(self._lock) # wakes producer on space/seek
+        self._seek_epoch = 0  # bumped on every seek request
+        self._seek_target = None  # pending seek (content frame) for the producer
+        self._cond = threading.Condition(self._lock)  # wakes producer on space/seek
+        self._volume = 1.0  # output gain, 0.0–1.0
 
     def _callback(self, outdata, frames, _time, status):
         try:
@@ -94,6 +95,8 @@ class _Player:
                     out += m
                     self._pos += m
                 outdata[out:] = 0
+                if self._volume != 1.0:
+                    outdata[:] = (outdata * self._volume).astype(np.int16)
         except Exception:
             outdata[:] = 0
 
@@ -124,6 +127,8 @@ class _Player:
             outdata[take:] = 0
         self._rd += take
         self._cur_content = int(self._cpos[last]) + 1
+        if self._volume != 1.0:
+            outdata[:] = (outdata * self._volume).astype(np.int16)
         self._cond.notify()
 
     def live_begin(self, rate, est_total=0, loop_marks=None):
@@ -509,6 +514,14 @@ class _Player:
         with self._lock:
             return self._underruns
 
+    def set_volume(self, value):
+        with self._lock:
+            self._volume = max(0.0, min(1.0, float(value)))
+
+    def volume(self):
+        with self._lock:
+            return self._volume
+
     def rate(self):
         with self._lock:
             return self._rate
@@ -612,6 +625,12 @@ def is_final():
 
 def underruns():
     return _player.underruns()
+
+def set_volume(value):
+    _player.set_volume(value)
+
+def volume():
+    return _player.volume()
 
 def unload():
     _player.unload()
