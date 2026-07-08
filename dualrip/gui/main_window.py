@@ -485,6 +485,10 @@ class MainWindow(QMainWindow):
         kind = it.data(0, ROLE_KIND) if it is not None else None
         key = self._cache_key(seqarc, entry)
         if kind == 'seq':
+            if self.player.loaded_key == key and audio.is_live():
+                audio.request_seek(0)
+                self.player.resume()
+                return
             self._play_music_live(key, seqarc, entry)
             return
         cached = self._cache.get(key)

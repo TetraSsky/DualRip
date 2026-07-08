@@ -9,7 +9,7 @@ import threading
 import time
 import numpy as np
 from PySide6.QtCore import QObject, Signal
-from ..engine.render import LiveRenderer, estimate_end_sample, render_entry_stream
+from ..engine.render import LiveRenderer, render_entry_stream
 from ..export import RenderResult, rip_archive, rip_sequences
 from . import audio
 
@@ -17,7 +17,6 @@ from . import audio
 PRIME_SECONDS = 0.3 # buffer before playback auto-starts
 PACE_SLEEP = 0.03 # per-chunk GIL yield once playing (~5× realtime, no crackle)
 # Skipped during priming or when playhead > buffered > render at full speed.
-EST_YIELD_SLEEP = 0.002 # estimator GIL yield per abort_every clocks
 
 
 class _ThreadWorker(QObject):
@@ -70,17 +69,18 @@ class StreamWorker(_ThreadWorker):
         if audio.state() == audio.PLAYING and audio.position() < audio.buffered():
             time.sleep(PACE_SLEEP)
 
-    def _start_estimator(self, token, blob, offset, player_prio):
-        """Run sequencer without synthesis (~500× faster) > instant bar size."""
-
-        def should_abort():
-            time.sleep(EST_YIELD_SLEEP)
-            return self._cancel.is_set()
+    def _start_racer(self, token, blob, offset, bank, waveArc, entry_volume, player_prio):
+        """State-only LiveRenderer fast-forward → exact total before the streaming render produces much audio (~50-500× faster, no numpy synthesis)."""
 
         def run():
-            total = estimate_end_sample(blob, offset, self._rate, player_prio=player_prio, should_abort=should_abort)
-            if total and not self._cancel.is_set():
-                audio.set_estimated_total(token, total)
+            try:
+                r = LiveRenderer(blob, offset, bank, waveArc, entry_volume, self._rate, player_prio=player_prio)
+                while not r.finished and not self._cancel.is_set():
+                    r.step(produce=False)
+                if not self._cancel.is_set():
+                    audio.set_estimated_total(token, r.emitted)
+            except Exception:
+                pass
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -99,7 +99,7 @@ class StreamWorker(_ThreadWorker):
 
         token = audio.stream_begin(self._rate, int(self._rate * PRIME_SECONDS))
         if token is not None:
-            self._start_estimator(token, self._seqarc.blob, entry.offset, entry.cpr or 0)
+            self._start_racer(token, self._seqarc.blob, entry.offset, bank, wave_arc, entry.volume, entry.cpr or 0)
         chunks = []
         looped = False
         marks = None
@@ -224,23 +224,12 @@ class LiveWorker(_ThreadWorker):
         block = parts[0] if len(parts) == 1 else np.concatenate(parts)
         return block, content_start
 
-    def _estimator(self, token):
-        """Sequencer without synthesis > instant bar size (refined by racer)."""
-        def should_abort():
-            time.sleep(EST_YIELD_SLEEP)
-            return self._cancel.is_set()
+    def _racer(self, token, yield_gil=True):
+        """
+        State-only run > checkpoints + exact length/loop marks.
 
-        try:
-            total = estimate_end_sample(
-                self._args[0], self._args[1], self._rate,
-                player_prio=self._prio, should_abort=should_abort)
-            if total and not self._cancel.is_set():
-                audio.live_set_total(token, total, exact=False)
-        except Exception:
-            pass
-
-    def _racer(self, token):
-        """State-only run > checkpoints + exact length/loop marks (GIL-yielding)."""
+        When yield_gil=False (called synchronously before the producer), runs at max speed (~150× realtime) — no loop-end undershoot.
+        """
         try:
             r = self._new_renderer()
             self._ckpts.add(r.snapshot())
@@ -253,13 +242,15 @@ class LiveWorker(_ThreadWorker):
                 if r.emitted >= next_ck and not r.finished:
                     self._ckpts.add(r.snapshot())
                     next_ck += interval
-                time.sleep(RACE_YIELD) # hand the GIL to producer + callback
+                if yield_gil:
+                    time.sleep(RACE_YIELD)
             if self._cancel.is_set():
                 return
             total = r.emitted
             marks = r.loop_marks
             looped = r.ply.loop_detected
-            audio.live_set_total(token, total, exact=True, loop_marks=marks)
+            if token is not None:
+                audio.live_set_total(token, total, exact=True, loop_marks=marks)
             ls = marks[0] / self._rate if marks else None
             le = marks[1] / self._rate if marks else None
             res = RenderResult(
@@ -295,13 +286,11 @@ class LiveWorker(_ThreadWorker):
         self._args = (self._seqarc.blob, entry.offset, bank, wave_arc, entry.volume, self._rate)
 
         token = audio.live_begin(self._rate)
-        if token is None:
-            # no audio device: surface length/loop metadata anyway
-            self._racer(None)
-            return
 
-        threading.Thread(target=self._estimator, args=(token,), daemon=True).start()
-        threading.Thread(target=self._racer, args=(token,), daemon=True).start()
+        self._racer(token, yield_gil=False)
+
+        if token is None or self._cancel.is_set():
+            return
 
         renderer = self._new_renderer()
         try:
