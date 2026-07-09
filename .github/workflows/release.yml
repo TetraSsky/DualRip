@@ -46,6 +46,8 @@ jobs:
         with:
           files: dist/${{ matrix.artifact }}
           body: |
+            ## DualRip ${{ github.ref_name }}
+
             - Rips every SSAR entry & SSEQ music sequence to WAV (CLI + GUI).
             - Accepts `.sdat` files or `.nds` ROMs directly — SDATs are extracted automatically.
             - For ROMs with multiple SDATs (e.g. Sonic Colors), pick several at once in the import dialog.
