@@ -66,6 +66,19 @@ class SdatFile:
         self._meta_cache = {}
         self._swar_cache = {}
 
+    @classmethod
+    def from_bytes(cls, data: bytes, label: str = '<ROM>') -> 'SdatFile':
+        """Construct an SdatFile from raw SDAT bytes (e.g. extracted from a .nds ROM)."""
+        inst = cls.__new__(cls)
+        inst.path = label
+        inst._sdat = ndspy.soundArchive.SDAT(data)
+        inst._seqarc_cache = {}
+        inst._seq_cache = {}
+        inst._bank_cache = {}
+        inst._meta_cache = {}
+        inst._swar_cache = {}
+        return inst
+
     @property
     def seqarc_list(self):
         """[(arc_id, name, entry_count)] for every non-null archive."""

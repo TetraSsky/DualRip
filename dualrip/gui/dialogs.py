@@ -119,15 +119,15 @@ class ExportDialog(QDialog):
     """
     Confirmation + live log window for a batch export.
 
-    jobs: [(kind, ident, sel)] where kind is 'arc' (ident=arc_id) or 'seq'
-    (ident=None); sel is a set of indices/ids or None for the whole thing.
+    sdats: OrderedDict[sdat_key, (label, SdatFile)]
+    jobs: [(sdat_key, kind, ident, sel)] where kind is 'arc' (ident=arc_id) or 'seq' (ident=None); sel is a set of indices/ids or None for all.
     """
 
-    def __init__(self, sdat, jobs, rate, override_map, parent=None):
+    def __init__(self, sdats, jobs, rate, override_map, parent=None):
         super().__init__(parent)
         self.setWindowTitle('Export')
         self.resize(*EXPORT_DIALOG_SIZE)
-        self._sdat = sdat
+        self._sdats = sdats
         self._jobs = jobs
         self._rate = rate
         self._override = override_map
@@ -137,7 +137,7 @@ class ExportDialog(QDialog):
 
         lay = QVBoxLayout(self)
 
-        total = sum(self._job_size(kind, ident, sel) for kind, ident, sel in jobs)
+        total = sum(self._job_size(sk, kind, ident, sel) for sk, kind, ident, sel in jobs)
         self.lbl_summary = QLabel(f'{total} items from {len(jobs)} group(s), {rate} Hz')
         lay.addWidget(self.lbl_summary)
 
@@ -172,36 +172,42 @@ class ExportDialog(QDialog):
         btns.addWidget(self.btn_cancel)
         lay.addLayout(btns)
 
-    def _all_seq_ids(self):
-        return [sid for sid, _n, _b in self._sdat.sequence_list]
+    def _sdat(self, sk):
+        """Return the SdatFile for sdat_key sk."""
+        return self._sdats[sk][1]
 
-    def _job_size(self, kind, ident, sel):
+    def _all_seq_ids(self, sk):
+        sdat = self._sdat(sk)
+        return [sid for sid, _n, _b in sdat.sequence_list]
+
+    def _job_size(self, sk, kind, ident, sel):
+        sdat = self._sdat(sk)
         if kind == 'seq':
-            return len(sel) if sel is not None else len(self._all_seq_ids())
+            return len(sel) if sel is not None else len(self._all_seq_ids(sk))
         if sel is not None:
             return len(sel)
-        return len(self._sdat.seqarc(ident).entries)
+        return len(sdat.seqarc(ident).entries)
 
     def _plan(self):
         self.log.appendPlainText('Export :')
-        seq_names = None
-        for kind, ident, sel in self._jobs:
+        for sk, kind, ident, sel in self._jobs:
+            sdat = self._sdat(sk)
+            sdat_label = self._sdats[sk][0]
             if kind == 'seq':
-                if seq_names is None:
-                    seq_names = {sid: name for sid, name, _b in self._sdat.sequence_list}
-                ids = sorted(sel) if sel is not None else self._all_seq_ids()
+                seq_names = {sid: name for sid, name, _b in sdat.sequence_list}
+                ids = sorted(sel) if sel is not None else self._all_seq_ids(sk)
                 if sel is None:
-                    self.log.appendPlainText(f'SSEQ (music) - all {len(ids)} sequences')
+                    self.log.appendPlainText(f'[{sdat_label}] SSEQ (music) - all {len(ids)} sequences')
                 else:
-                    self.log.appendPlainText(f'SSEQ (music) - {len(ids)} sequences:')
+                    self.log.appendPlainText(f'[{sdat_label}] SSEQ (music) - {len(ids)} sequences:')
                     for sid in ids:
                         self.log.appendPlainText(f'[{sid:3d}] {seq_names.get(sid, sid)}')
             else:
-                seqarc = self._sdat.seqarc(ident)
+                seqarc = sdat.seqarc(ident)
                 if sel is None:
-                    self.log.appendPlainText(f'{ident:03d} {seqarc.name} - all {len(seqarc.entries)} entries')
+                    self.log.appendPlainText(f'[{sdat_label}] {ident:03d} {seqarc.name} - all {len(seqarc.entries)} entries')
                 else:
-                    self.log.appendPlainText(f'{ident:03d} {seqarc.name} - {len(sel)} entries:')
+                    self.log.appendPlainText(f'[{sdat_label}] {ident:03d} {seqarc.name} - {len(sel)} entries:')
                     for idx in sorted(sel):
                         self.log.appendPlainText(f'[{idx:3d}] {seqarc.entries[idx].name}')
         self.log.appendPlainText('')
@@ -221,7 +227,7 @@ class ExportDialog(QDialog):
         self.ed_out.setEnabled(False)
         self.progress.setVisible(True)
         self.log.appendPlainText(f'Exporting to {out}')
-        self._worker = BatchWorker(self._sdat, self._jobs, out, self._rate, self._override)
+        self._worker = BatchWorker(self._sdats, self._jobs, out, self._rate, self._override)
         self._worker.batch_progress.connect(self._on_progress)
         self._worker.archive_done.connect(self._on_archive_done)
         self._worker.batch_done.connect(self._on_done)

@@ -26,19 +26,24 @@ Batch export with per-entry log, loop points and bank auto-resolution notes:
 ```
 dualrip --sdat sound_data.sdat --archive all --out MyRip
 dualrip --sdat sound_data.sdat --sequence all --out MyMusic
+dualrip --sdat game.nds --sdat-index 0 --archive all --out MyRip
 ```
 
 | Option | Effect |
 |---|---|
+| `--sdat PATH` | path to a `.sdat` file or a `.nds` ROM |
+| `--sdat-index N` | when using a `.nds` ROM with multiple SDATs, pick one (0 = first). Omit to list them. |
 | `--archive N` | rip one SSAR archive, or `all` (default when no `--sequence`) |
 | `--sequence N...` | rip these SSEQ music indices, or `all` (into an `SSEQ/` subfolder) |
 | `--rate N` | sample rate (default 44100) |
 | `--only I J...` | only these entry indices |
 | `--bank-map "4=32+33"` | override bank resolution |
 
-GUI: open a `.sdat`, browse/filter, double-click to preview any sound effect
-or music track (seek, pause, loop on its own loop points), Ctrl/Shift-select
-sound effects, archives or sequences and export.
+GUI: open a `.sdat` or `.nds`, browse/filter, double-click to preview any
+sound effect or music track (seek, pause, loop on its own loop points),
+Ctrl/Shift-select sound effects, archives or sequences and export.
+ROMs with multiple SDATs (e.g. Sonic Colors has 12) let you pick several
+at once via the selection dialog; they appear as top-level groups in the tree.
 
 ## Dynamic bank slots
 
@@ -57,7 +62,7 @@ note-wait on endless notes (voice chaining) and portamento sweep on tied notes.
 
 ```
 dualrip/tables.py, cprims.py   lookup tables, C-semantics primitives
-dualrip/formats/               SWAR/SWAV, SBNK, SDAT (only sdat.py touches ndspy)
+dualrip/formats/               SWAR/SWAV, SBNK, SDAT, NDS/SDAT extraction
 dualrip/engine/                sequencer, envelopes/synthesis, raw-export policy
 dualrip/bankmap.py             static patch scan + auto bank resolution
 dualrip/export.py              WAV/manifest, public API: render_one / rip_archive / rip_sequences

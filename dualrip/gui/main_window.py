@@ -1,5 +1,9 @@
 """
 DualRip main window: SDAT explorer, entry details, audio preview, export.
+
+Supports opening multiple SDATs simultaneously (e.g. from a .nds ROM that
+contains several sound archives).  The tree groups entries by SDAT so the user
+can browse and export across all of them without re-opening the file.
 """
 
 import os
@@ -9,12 +13,16 @@ from PySide6.QtGui import QAction, QIcon, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QFormLayout,
     QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -26,6 +34,7 @@ from PySide6.QtWidgets import (
 )
 from .. import __version__
 from ..bankmap import BankResolver, parse_bank_map
+from ..formats.rom import find_sdats_in_rom
 from ..formats.sdat import SdatFile
 from . import audio
 from .dialogs import ExportDialog, SettingsDialog, load_settings
@@ -33,23 +42,21 @@ from .player import PlayerBar
 from .workers import LiveWorker, StreamWorker
 
 CACHE_SIZE = 48
-# Music renders are large (a 4-minute song is ~40 MB at 44.1 kHz stereo), so
-# the preview cache is also bounded by total audio bytes, not just count.
-# A 4-min song ≈ 40 MB at 44.1 kHz stereo int16 — cap cache by bytes too.
 CACHE_MAX_BYTES = 256 * 1024 * 1024
 
 # --- layout constants ---
-FORM_HSPACING = 32 # horizontal gap between label and value in the details panel
-SPLITTER_LEFT = 580 # initial left-panel width
-SPLITTER_RIGHT = 440 # initial right-panel width
-TREE_COL_NAME = 330 # "Name" column width in the tree
-TREE_COL_ID = 46 # "ID" column width in the tree
+FORM_HSPACING = 32
+SPLITTER_LEFT = 580
+SPLITTER_RIGHT = 440
+TREE_COL_NAME = 330
+TREE_COL_ID = 46
 
-# ROLE_KIND: 'cat' | 'seqcat' | 'arc' | 'entry' | 'seq' | 'bank' | 'war'
-# 'seqcat' is the Sequences category node; selecting it exports all music.
+# ROLE_KIND: 'sdat' | 'cat' | 'seqcat' | 'arc' | 'entry' | 'seq' | 'bank' | 'war'
 ROLE_KIND = Qt.UserRole
 ROLE_ARC = Qt.UserRole + 1
 ROLE_INDEX = Qt.UserRole + 2
+ROLE_SDAT = Qt.UserRole + 3 # sdat_key on every item, identifies owning SdatFile
+
 
 class MainWindow(QMainWindow):
     def __init__(self, icon_path=None):
@@ -59,26 +66,39 @@ class MainWindow(QMainWindow):
             self.setWindowIcon(QIcon(icon_path))
         self.resize(1060, 680)
 
-        self.sdat = None
-        self.sdat_path = None
+        # _sdats: OrderedDict[sdat_key, (label, SdatFile)]
+        self._sdats = OrderedDict()
+        self._sdat_path = None # display label for title bar / status
         self.settings = load_settings()
-        self._resolvers = {}
-        self._cache = OrderedDict() # (arc_id, index, rate) -> RenderResult
-        self._preview_worker = None # in-flight StreamWorker (one at a time)
-        self._preview_key = None # key of the active stream (stale-signal guard)
-        self._generation = 0 # bumped per SDAT so stale renders miss
+        self._resolvers = {} # (sdat_key, arc_id) -> BankResolver
+        self._cache = OrderedDict() # (gen, sdat_key, arc_id, index, rate) -> RenderResult
+        self._preview_worker = None
+        self._preview_key = None
+        self._generation = 0
 
         self._build_menu()
         self._build_ui()
         self._set_loaded(False)
 
+    # -- backward-compat accessors for single-SDAT code paths --
+    @property
+    def sdat(self):
+        """First/only SdatFile (None when nothing is loaded)."""
+        if self._sdats:
+            return next(iter(self._sdats.values()))[1]
+        return None
+
+    @property
+    def sdat_path(self):
+        return self._sdat_path
+
     def _build_menu(self):
         m_file = self.menuBar().addMenu('&File')
-        act_open = QAction('&Open SDAT...', self)
+        act_open = QAction('&Open SDAT/NDS...', self)
         act_open.setShortcut(QKeySequence.Open)
         act_open.triggered.connect(self.open_sdat)
         m_file.addAction(act_open)
-        self.act_close_sdat = QAction('&Close SDAT', self)
+        self.act_close_sdat = QAction('&Close file', self)
         self.act_close_sdat.setShortcut('Ctrl+W')
         self.act_close_sdat.triggered.connect(self._close_sdat)
         m_file.addAction(self.act_close_sdat)
@@ -210,113 +230,231 @@ class MainWindow(QMainWindow):
 
     def open_sdat(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, 'Open SDAT', '', 'SDAT files (*.sdat);;All files (*)'
+            self, 'Open SDAT or NDS ROM', '',
+            'Audio files (*.sdat *.nds);;SDAT files (*.sdat);;NDS ROMs (*.nds);;All files (*)'
         )
         if not path:
             return
         try:
             QApplication.setOverrideCursor(Qt.WaitCursor)
             self._cancel_preview()
-            self.sdat = SdatFile(path)
-            self.sdat_path = path
-            self._generation += 1
-            self._resolvers.clear()
-            self._cache.clear()
-            self.player.clear()
-            self._fill_tree()
+            if path.lower().endswith('.nds'):
+                self._open_nds(path)
+            else:
+                self._open_sdat_file(path)
         except Exception as exc:
-            QMessageBox.critical(self, 'DualRip', f'Cannot open SDAT:\n{exc}')
+            QMessageBox.critical(self, 'DualRip', f'Cannot open:\n{exc}')
             return
         finally:
             QApplication.restoreOverrideCursor()
         self._set_loaded(True)
-        n = sum(c for _i, _n, c in self.sdat.seqarc_list)
-        nseq = len(self.sdat.sequence_list)
-        self.statusBar().showMessage(
-            f'{os.path.basename(path)} - '
-            f'{len(self.sdat.seqarc_list)} sequence archives, {n} entries, '
-            f'{nseq} music sequences.'
-        )
-        self.setWindowTitle(f'DualRip - {os.path.basename(path)}')
+        self._update_status_and_title()
 
-    def _close_sdat(self):
-        self._cancel_preview()
-        self.sdat = None
-        self.sdat_path = None
+    def _open_sdat_file(self, path):
+        """Open a plain .sdat file — single SDAT, key='0'."""
+        self._clear_all()
+        sdat = SdatFile(path)
+        self._sdats['0'] = (os.path.basename(path), sdat)
+        self._sdat_path = path
         self._generation += 1
+        self._fill_tree()
+
+    def _open_nds(self, path):
+        """Open a .nds ROM: extract SDAT(s), allow multi-select."""
+        sdats = find_sdats_in_rom(path)
+        if len(sdats) == 1:
+            chosen = [sdats[0]]
+        else:
+            QApplication.restoreOverrideCursor()
+            chosen = self._pick_sdats_from_rom(path, sdats)
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            if not chosen:
+                raise ValueError('No SDAT selected.')
+        self._clear_all()
+        rom_name = os.path.basename(path)
+        for i, s in enumerate(chosen):
+            key = str(i)
+            label = f'{rom_name} [SDAT #{s["index"]}]'
+            sdat = SdatFile.from_bytes(s['data'], label=label)
+            self._sdats[key] = (label, sdat)
+        self._sdat_path = rom_name
+        self._generation += 1
+        self._fill_tree()
+
+    def _clear_all(self):
+        self._sdats.clear()
         self._resolvers.clear()
         self._cache.clear()
         self.player.clear()
+
+    def _pick_sdats_from_rom(self, rom_path, sdats):
+        """Show a dialog listing all SDATs — allow multi-selection (Ctrl/Shift-click)."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f'Select SDAT(s) — {os.path.basename(rom_path)}')
+        dlg.resize(680, 440)
+        layout = QVBoxLayout(dlg)
+        layout.addWidget(QLabel(f'This ROM contains <b>{len(sdats)} SDAT files</b>.<br>Select one or more (Ctrl/Shift-click) to open:'))
+        lst = QListWidget(dlg)
+        lst.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        for s in sdats:
+            size_kb = s['size'] / 1024
+            text = (
+                f'SDAT #{s["index"]:>3d}  —  {size_kb:>6.0f} KB  |  '
+                f'{s["seqarcs"]:>2d} SSAR, {s["sseqs"]:>2d} SSEQ, '
+                f'{s["banks"]:>2d} banks, {s["swars"]:>2d} SWAR'
+            )
+            item = QListWidgetItem(text)
+            item.setData(Qt.UserRole, s)
+            lst.addItem(item)
+        lst.setCurrentRow(0)
+        lst.itemDoubleClicked.connect(dlg.accept)
+        layout.addWidget(lst)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+        if dlg.exec() != QDialog.Accepted:
+            return None
+        return [lst.item(i).data(Qt.UserRole)
+            for i in range(lst.count())
+            if lst.item(i).isSelected()]
+
+    def _close_sdat(self):
+        self._cancel_preview()
+        self._clear_all()
+        self._sdats.clear()
+        self._sdat_path = None
+        self._generation += 1
         self.tree.clear()
         self._set_loaded(False)
         self.setWindowTitle('DualRip')
         self.statusBar().clearMessage()
 
+    # -- tree population -----------------------------------------------------
+
     def _fill_tree(self):
         self.tree.clear()
+        single = len(self._sdats) == 1
 
-        cat_arcs = QTreeWidgetItem(['Sequence Archives (SSAR)', '', ''])
-        cat_arcs.setData(0, ROLE_KIND, 'cat')
-        for arc_id, name, _count in self.sdat.seqarc_list:
-            seqarc = self.sdat.seqarc(arc_id)
-            top = QTreeWidgetItem([name, str(arc_id), ''])
-            top.setData(0, ROLE_KIND, 'arc')
-            top.setData(0, ROLE_ARC, arc_id)
-            playable = 0
-            for e in seqarc.entries:
-                if e.offset is None:
-                    continue
-                bank = str(e.bank_id)
-                if self.sdat.bank_is_null(e.bank_id):
-                    bank += ' (auto)'
-                it = QTreeWidgetItem([e.name, str(e.index), f'bank {bank}'])
-                it.setData(0, ROLE_KIND, 'entry')
-                it.setData(0, ROLE_ARC, arc_id)
-                it.setData(0, ROLE_INDEX, e.index)
-                top.addChild(it)
-                playable += 1
-            top.setText(2, f'{playable} entries')
-            cat_arcs.addChild(top)
-        self.tree.addTopLevelItem(cat_arcs)
+        for sdat_key, (label, sdat) in self._sdats.items():
+            n_arcs = len(sdat.seqarc_list)
+            n_sseq = len(sdat.sequence_list)
+            n_banks = sdat.num_banks
+            n_swar = len(sdat.wave_archive_list)
+            total_entries = sum(c for _i, _n, c in sdat.seqarc_list)
+            info_parts = [f'{n_arcs} SSAR, {total_entries} entries']
+            if n_sseq:
+                info_parts.append(f'{n_sseq} SSEQ')
+            info_parts.append(f'{n_banks} banks, {n_swar} SWAR')
+            info = ', '.join(info_parts)
 
-        seqs = self.sdat.sequence_list
-        cat_seq = QTreeWidgetItem(['Sequences (SSEQ)', '', f'{len(seqs)}'])
-        cat_seq.setData(0, ROLE_KIND, 'seqcat')
-        for sid, name, bank_id in seqs:
-            bank = ''
-            if bank_id is not None:
-                bank = f'bank {bank_id}'
-                if self.sdat.bank_is_null(bank_id):
-                    bank += ' (auto)'
-            it = QTreeWidgetItem([name, str(sid), bank])
-            it.setData(0, ROLE_KIND, 'seq')
-            it.setData(0, ROLE_INDEX, sid)
-            cat_seq.addChild(it)
-        self.tree.addTopLevelItem(cat_seq)
+            sdat_root = QTreeWidgetItem([label, '', info])
+            sdat_root.setData(0, ROLE_KIND, 'sdat')
+            sdat_root.setData(0, ROLE_SDAT, sdat_key)
+            sdat_root.setFlags(sdat_root.flags() & ~Qt.ItemIsSelectable)
 
-        banks = self.sdat.bank_list
-        cat_bank = QTreeWidgetItem(['Banks (SBNK)', '', f'{len(banks)}'])
-        cat_bank.setData(0, ROLE_KIND, 'cat')
-        for bid, name, wids in banks:
-            if wids is None:
-                it = QTreeWidgetItem([name or '(null / dynamic slot)', str(bid), 'filled at runtime'])
-            else:
-                shown = ', '.join(str(w) for w in wids if w is not None)
-                it = QTreeWidgetItem([name, str(bid), f'wave archives {shown}'])
-            it.setData(0, ROLE_KIND, 'bank')
-            it.setData(0, ROLE_INDEX, bid)
-            cat_bank.addChild(it)
-        self.tree.addTopLevelItem(cat_bank)
+            def _set_sdat(item):
+                item.setData(0, ROLE_SDAT, sdat_key)
 
-        wars = self.sdat.wave_archive_list
-        cat_war = QTreeWidgetItem(['Wave Archives (SWAR)', '', f'{len(wars)}'])
-        cat_war.setData(0, ROLE_KIND, 'cat')
-        for wid, name, cnt in wars:
-            it = QTreeWidgetItem([name, str(wid), f'{cnt} waves'])
-            it.setData(0, ROLE_KIND, 'war')
-            it.setData(0, ROLE_INDEX, wid)
-            cat_war.addChild(it)
-        self.tree.addTopLevelItem(cat_war)
+            # --- Sequence Archives (SSAR) ---
+            cat_arcs = QTreeWidgetItem(['Sequence Archives (SSAR)', '', ''])
+            cat_arcs.setData(0, ROLE_KIND, 'cat')
+            _set_sdat(cat_arcs)
+            for arc_id, name, _count in sdat.seqarc_list:
+                seqarc = sdat.seqarc(arc_id)
+                top = QTreeWidgetItem([name, str(arc_id), ''])
+                top.setData(0, ROLE_KIND, 'arc')
+                top.setData(0, ROLE_ARC, arc_id)
+                _set_sdat(top)
+                playable = 0
+                for e in seqarc.entries:
+                    if e.offset is None:
+                        continue
+                    bank = str(e.bank_id)
+                    if sdat.bank_is_null(e.bank_id):
+                        bank += ' (auto)'
+                    it = QTreeWidgetItem([e.name, str(e.index), f'bank {bank}'])
+                    it.setData(0, ROLE_KIND, 'entry')
+                    it.setData(0, ROLE_ARC, arc_id)
+                    it.setData(0, ROLE_INDEX, e.index)
+                    _set_sdat(it)
+                    top.addChild(it)
+                    playable += 1
+                top.setText(2, f'{playable} entries')
+                cat_arcs.addChild(top)
+            sdat_root.addChild(cat_arcs)
+
+            # --- Sequences (SSEQ) ---
+            seqs = sdat.sequence_list
+            cat_seq = QTreeWidgetItem(['Sequences (SSEQ)', '', f'{len(seqs)}'])
+            cat_seq.setData(0, ROLE_KIND, 'seqcat')
+            _set_sdat(cat_seq)
+            for sid, name, bank_id in seqs:
+                bank = ''
+                if bank_id is not None:
+                    bank = f'bank {bank_id}'
+                    if sdat.bank_is_null(bank_id):
+                        bank += ' (auto)'
+                it = QTreeWidgetItem([name, str(sid), bank])
+                it.setData(0, ROLE_KIND, 'seq')
+                it.setData(0, ROLE_INDEX, sid)
+                _set_sdat(it)
+                cat_seq.addChild(it)
+            sdat_root.addChild(cat_seq)
+
+            # --- Banks (SBNK) ---
+            banks = sdat.bank_list
+            cat_bank = QTreeWidgetItem(['Banks (SBNK)', '', f'{len(banks)}'])
+            cat_bank.setData(0, ROLE_KIND, 'cat')
+            _set_sdat(cat_bank)
+            for bid, name, wids in banks:
+                if wids is None:
+                    it = QTreeWidgetItem([name or '(null / dynamic slot)', str(bid), 'filled at runtime'])
+                else:
+                    shown = ', '.join(str(w) for w in wids if w is not None)
+                    it = QTreeWidgetItem([name, str(bid), f'wave archives {shown}'])
+                it.setData(0, ROLE_KIND, 'bank')
+                it.setData(0, ROLE_INDEX, bid)
+                _set_sdat(it)
+                cat_bank.addChild(it)
+            sdat_root.addChild(cat_bank)
+
+            # --- Wave Archives (SWAR) ---
+            wars = sdat.wave_archive_list
+            cat_war = QTreeWidgetItem(['Wave Archives (SWAR)', '', f'{len(wars)}'])
+            cat_war.setData(0, ROLE_KIND, 'cat')
+            _set_sdat(cat_war)
+            for wid, name, cnt in wars:
+                it = QTreeWidgetItem([name, str(wid), f'{cnt} waves'])
+                it.setData(0, ROLE_KIND, 'war')
+                it.setData(0, ROLE_INDEX, wid)
+                _set_sdat(it)
+                cat_war.addChild(it)
+            sdat_root.addChild(cat_war)
+
+            self.tree.addTopLevelItem(sdat_root)
+            if single:
+                sdat_root.setExpanded(True)
+
+    def _update_status_and_title(self):
+        if not self._sdats:
+            return
+        total_entries = 0
+        total_sseq = 0
+        n_sdats = len(self._sdats)
+        for _label, sdat in self._sdats.values():
+            total_entries += sum(c for _i, _n, c in sdat.seqarc_list)
+            total_sseq += len(sdat.sequence_list)
+        base = os.path.basename(self._sdat_path or '')
+        if n_sdats == 1:
+            self.statusBar().showMessage(
+                f'{base} - {total_entries} entries, {total_sseq} music sequences.'
+            )
+        else:
+            self.statusBar().showMessage(
+                f'{base} - {n_sdats} SDATs, {total_entries} entries, {total_sseq} music sequences.'
+            )
+        self.setWindowTitle(f'DualRip - {base}' if base else 'DualRip')
 
     def _apply_filter(self, text):
         text = text.strip().lower()
@@ -342,24 +480,40 @@ class MainWindow(QMainWindow):
             if text and vis:
                 top.setExpanded(True)
 
+    # -- selection & details helpers -----------------------------------------
+
+    def _sdat_for(self, it):
+        """Return the SdatFile that owns this tree item, or None."""
+        key = it.data(0, ROLE_SDAT)
+        if key is not None and key in self._sdats:
+            return self._sdats[key][1]
+        return None
+
+    def _sdat_key_for(self, it):
+        return it.data(0, ROLE_SDAT)
+
     def _current_playable(self):
-        """Return (seqarc, entry) for current item if renderable (SSAR entry or standalone SSEQ), else (None, None). SSEQ > synthetic one-entry SeqArc, same downstream path as SSAR."""
+        """Return (sdat, sdat_key, seqarc, entry) for current item if renderable, else (None, None, None, None)."""
         it = self.tree.currentItem()
-        if it is None or self.sdat is None:
-            return None, None
+        if it is None or not self._sdats:
+            return None, None, None, None
+        sdat = self._sdat_for(it)
+        if sdat is None:
+            return None, None, None, None
         kind = it.data(0, ROLE_KIND)
         if kind == 'entry':
-            seqarc = self.sdat.seqarc(it.data(0, ROLE_ARC))
-            return seqarc, seqarc.entries[it.data(0, ROLE_INDEX)]
+            seqarc = sdat.seqarc(it.data(0, ROLE_ARC))
+            return sdat, self._sdat_key_for(it), seqarc, seqarc.entries[it.data(0, ROLE_INDEX)]
         if kind == 'seq':
-            seqarc = self.sdat.sequence(it.data(0, ROLE_INDEX))
-            return seqarc, seqarc.entries[0]
-        return None, None
+            seqarc = sdat.sequence(it.data(0, ROLE_INDEX))
+            return sdat, self._sdat_key_for(it), seqarc, seqarc.entries[0]
+        return None, None, None, None
 
     def _selection_changed(self, *_):
         it = self.tree.currentItem()
-        if it is None or self.sdat is None:
+        if it is None or not self._sdats:
             return
+        sdat = self._sdat_for(it)
         kind = it.data(0, ROLE_KIND)
         self.player.setVisible(kind in ('entry', 'seq'))
         for lbl in (
@@ -371,7 +525,7 @@ class MainWindow(QMainWindow):
         ):
             lbl.setText('-')
         if kind in ('entry', 'seq'):
-            seqarc, entry = self._current_playable()
+            _sd, sk, seqarc, entry = self._current_playable()
             self.lbl_name.setText(entry.name)
             if kind == 'entry':
                 self.lbl_kind.setText('Sound effect (SSAR entry)')
@@ -380,48 +534,58 @@ class MainWindow(QMainWindow):
                 self.lbl_kind.setText('Music sequence (SSEQ)')
                 self.lbl_where.setText(f'sequence {entry.index}')
             bank = str(entry.bank_id)
-            bname = self.sdat.bank_name(entry.bank_id)
-            if self.sdat.bank_is_null(entry.bank_id):
-                bank += ' (dynamic slot, resolved automatically)'
-            elif bname:
-                bank += f' {bname}'
+            if sdat is not None:
+                bname = sdat.bank_name(entry.bank_id)
+                if sdat.bank_is_null(entry.bank_id):
+                    bank += ' (dynamic slot, resolved automatically)'
+                elif bname:
+                    bank += f' {bname}'
             self.lbl_bank.setText(bank)
             self.lbl_volume.setText(str(entry.volume))
-            self._show_render(self._cache.get(self._cache_key(seqarc, entry)))
+            self._show_render(self._cache.get(self._cache_key(sk, seqarc, entry)))
         elif kind == 'arc':
-            arc_id = it.data(0, ROLE_ARC)
-            seqarc = self.sdat.seqarc(arc_id)
-            self.lbl_name.setText(seqarc.name)
-            self.lbl_kind.setText('Sequence archive (SSAR)')
-            self.lbl_where.setText(f'archive {arc_id:03d}')
-            self.lbl_status.setText(it.text(2))
+            if sdat is not None:
+                arc_id = it.data(0, ROLE_ARC)
+                seqarc = sdat.seqarc(arc_id)
+                self.lbl_name.setText(seqarc.name)
+                self.lbl_kind.setText('Sequence archive (SSAR)')
+                self.lbl_where.setText(f'archive {arc_id:03d}')
+                self.lbl_status.setText(it.text(2))
         elif kind == 'seqcat':
             self.lbl_name.setText('Sequences (SSEQ)')
             self.lbl_kind.setText('Music sequence collection')
             self.lbl_where.setText(f'{it.text(2)} sequences')
-            self.lbl_status.setText('select to export all music')
+            if sdat is not None:
+                sk = self._sdat_key_for(it)
+                lbl = self._sdats[sk][0] if sk in self._sdats else ''
+                self.lbl_status.setText(f'from {lbl}' if lbl else 'select to export all music')
         elif kind == 'bank':
-            bid = it.data(0, ROLE_INDEX)
-            self.lbl_name.setText(it.text(0))
-            self.lbl_kind.setText('Instrument bank (SBNK)')
-            self.lbl_where.setText(f'bank {bid}')
-            if self.sdat.bank_is_null(bid):
-                self.lbl_bank.setText('NULL slot - filled at runtime by the game; use Settings > Bank map to pin a substitute, or let auto-resolution pick one per entry')
-            else:
-                meta = self.sdat.bank_meta(bid)
-                if meta:
-                    _e, _c, wids = meta
-                    names = []
-                    for w in wids:
-                        if w is not None:
-                            wn = next((n for i, n, _c2 in self.sdat.wave_archive_list if i == w), str(w))
-                            names.append(f'{w} ({wn})')
-                    self.lbl_bank.setText('wave archives: ' + (', '.join(names) or 'none'))
+            if sdat is not None:
+                bid = it.data(0, ROLE_INDEX)
+                self.lbl_name.setText(it.text(0))
+                self.lbl_kind.setText('Instrument bank (SBNK)')
+                self.lbl_where.setText(f'bank {bid}')
+                if sdat.bank_is_null(bid):
+                    self.lbl_bank.setText('NULL slot - filled at runtime by the game; use Settings > Bank map to pin a substitute, or let auto-resolution pick one per entry')
+                else:
+                    meta = sdat.bank_meta(bid)
+                    if meta:
+                        _e, _c, wids = meta
+                        names = []
+                        for w in wids:
+                            if w is not None:
+                                wn = next((n for i, n, _c2 in sdat.wave_archive_list if i == w), str(w))
+                                names.append(f'{w} ({wn})')
+                        self.lbl_bank.setText('wave archives: ' + (', '.join(names) or 'none'))
         elif kind == 'war':
             self.lbl_name.setText(it.text(0))
             self.lbl_kind.setText('Wave archive (SWAR)')
             self.lbl_where.setText(f'wave archive {it.text(1)}')
             self.lbl_status.setText(it.text(2))
+        elif kind == 'sdat':
+            self.lbl_name.setText(it.text(0))
+            self.lbl_kind.setText('SDAT container')
+            self.lbl_where.setText(it.text(2))
         else:
             self.lbl_name.setText(it.text(0))
             self.lbl_kind.setText('-')
@@ -440,9 +604,9 @@ class MainWindow(QMainWindow):
             self.lbl_loop.setText('none')
         self.lbl_status.setText(res.status + (f'({res.error})' if res.error else ''))
         if res.bank_label and '->' in res.bank_label:
-            self.lbl_bank.setText(
-                self.lbl_bank.text().split('(')[0] + f'(auto: {res.bank_label})'
-            )
+            self.lbl_bank.setText(self.lbl_bank.text().split('(')[0] + f'(auto: {res.bank_label})')
+
+    # -- bank resolver -------------------------------------------------------
 
     def _override_map(self):
         try:
@@ -450,19 +614,22 @@ class MainWindow(QMainWindow):
         except Exception:
             return {}
 
-    def _resolver(self, seqarc):
-        if seqarc.arc_id not in self._resolvers:
-            self._resolvers[seqarc.arc_id] = BankResolver(self.sdat, seqarc, self._override_map())
-        return self._resolvers[seqarc.arc_id]
+    def _resolver(self, sdat, sk, seqarc):
+        key = (sk, seqarc.arc_id)
+        if key not in self._resolvers:
+            self._resolvers[key] = BankResolver(sdat, seqarc, self._override_map())
+        return self._resolvers[key]
 
-    def _cache_key(self, seqarc, entry):
-        return (self._generation, seqarc.arc_id, entry.index, self.settings['rate'])
+    def _cache_key(self, sk, seqarc, entry):
+        return (self._generation, sk, seqarc.arc_id, entry.index, self.settings['rate'])
+
+    # -- playback ------------------------------------------------------------
 
     def _on_play_clicked(self):
-        seqarc, entry = self._current_playable()
-        if entry is None:
+        sdat, sk, seqarc, entry = self._current_playable()
+        if entry is None or sdat is None:
             return
-        same = self.player.loaded_key == self._cache_key(seqarc, entry)
+        same = self.player.loaded_key == self._cache_key(sk, seqarc, entry)
         if same and audio.is_live():
             st = audio.state()
             if st == audio.PLAYING:
@@ -470,7 +637,7 @@ class MainWindow(QMainWindow):
             if st == audio.PAUSED:
                 self.player.resume()
                 return
-            self.play_selected() # stopped / ended: restart fresh
+            self.play_selected()
             return
         if same and (audio.state() == audio.PAUSED or audio.position() > 0):
             self.player.resume()
@@ -478,18 +645,18 @@ class MainWindow(QMainWindow):
         self.play_selected()
 
     def play_selected(self):
-        seqarc, entry = self._current_playable()
-        if entry is None:
+        sdat, sk, seqarc, entry = self._current_playable()
+        if entry is None or sdat is None:
             return
         it = self.tree.currentItem()
         kind = it.data(0, ROLE_KIND) if it is not None else None
-        key = self._cache_key(seqarc, entry)
+        key = self._cache_key(sk, seqarc, entry)
         if kind == 'seq':
             if self.player.loaded_key == key and audio.is_live():
                 audio.request_seek(0)
                 self.player.resume()
                 return
-            self._play_music_live(key, seqarc, entry)
+            self._play_music_live(sdat, sk, key, seqarc, entry)
             return
         cached = self._cache.get(key)
         if cached is not None:
@@ -506,9 +673,7 @@ class MainWindow(QMainWindow):
         self._cancel_preview()
         audio.unload()
         self.statusBar().showMessage(f'Rendering {entry.name}...')
-        worker = StreamWorker(
-            key, self.sdat, seqarc, entry, self.settings['rate'], self._resolver(seqarc)
-        )
+        worker = StreamWorker(key, sdat, seqarc, entry, self.settings['rate'], self._resolver(sdat, sk, seqarc))
         worker.done.connect(self._preview_done)
         worker.failed.connect(self._preview_failed)
         self._preview_worker = worker
@@ -516,14 +681,12 @@ class MainWindow(QMainWindow):
         self.player.begin_stream(key, self.settings['rate'])
         worker.start()
 
-    def _play_music_live(self, key, seqarc, entry):
-        """Start seamless live music preview (LiveWorker). Playback near-instant, whole track seekable, audio not cached (only metadata once racer reports)."""
+    def _play_music_live(self, sdat, sk, key, seqarc, entry):
+        """Start seamless live music preview (LiveWorker)."""
         self._cancel_preview()
         audio.unload()
         self.statusBar().showMessage(f'Rendering {entry.name}...')
-        worker = LiveWorker(
-            key, self.sdat, seqarc, entry, self.settings['rate'], self._resolver(seqarc)
-        )
+        worker = LiveWorker(key, sdat, seqarc, entry, self.settings['rate'], self._resolver(sdat, sk, seqarc))
         worker.meta.connect(self._music_meta)
         worker.failed.connect(self._preview_failed)
         self._preview_worker = worker
@@ -532,22 +695,21 @@ class MainWindow(QMainWindow):
         worker.start()
 
     def _music_meta(self, key, res):
-        """LiveWorker reported exact length/loops (audio already playing, res.audio=None). Non-terminal: worker keeps running."""
+        """LiveWorker reported exact length/loops."""
         if key != self._preview_key:
             return
         self._cache[key] = res
         self._cache.move_to_end(key)
         self._evict_cache()
-        cur_arc, cur_entry = self._current_playable()
-        if cur_entry is not None and self._cache_key(cur_arc, cur_entry) == key:
+        _sd, sk, cur_arc, cur_entry = self._current_playable()
+        if cur_entry is not None and self._cache_key(sk, cur_arc, cur_entry) == key:
             self._show_render(res)
             if res.status in ('ok', 'loop'):
                 self.statusBar().showMessage(f'{res.name}: {res.duration:.2f}s')
             else:
-                self.statusBar().showMessage( f'{res.name}: {res.status}' + (f'({res.error})' if res.error else ''))
+                self.statusBar().showMessage(f'{res.name}: {res.status}' + (f'({res.error})' if res.error else ''))
 
     def _cancel_preview(self):
-        """Cancel + join in-flight worker. Returns quickly (worker checks cancel flag between chunks/pacing sleeps)."""
         worker, self._preview_worker = self._preview_worker, None
         self._preview_key = None
         if worker is not None:
@@ -581,8 +743,8 @@ class MainWindow(QMainWindow):
         self._cache[key] = res
         self._cache.move_to_end(key)
         self._evict_cache()
-        cur_arc, cur_entry = self._current_playable()
-        if cur_entry is not None and self._cache_key(cur_arc, cur_entry) == key:
+        _sd, sk, cur_arc, cur_entry = self._current_playable()
+        if cur_entry is not None and self._cache_key(sk, cur_arc, cur_entry) == key:
             self._show_render(res)
             if res.audio is None:
                 self.statusBar().showMessage(
@@ -599,51 +761,66 @@ class MainWindow(QMainWindow):
         self._preview_key = None
         self.statusBar().showMessage(f'Render failed: {msg}')
 
+    # -- export --------------------------------------------------------------
+
     def _selected_jobs(self):
-        """Build tagged jobs [(kind, ident, sel)] from tree selection. 'arc'/'entry' > SSAR jobs; 'seq'/'seqcat' > one SSEQ music job."""
-        whole = set()
-        partial = {}
-        seq_ids = set()
-        all_seqs = False
+        """
+        Build tagged jobs [(sdat_key, kind, ident, sel)] from tree selection.
+        Each job belongs to the SDAT identified by sdat_key.
+        """
+        per_sdat = {}
         for it in self.tree.selectedItems():
+            sk = self._sdat_key_for(it)
+            if sk is None:
+                continue
+            if sk not in per_sdat:
+                per_sdat[sk] = {'whole': set(), 'partial': {}, 'seq': set(), 'all_seqs': False}
+            p = per_sdat[sk]
             kind = it.data(0, ROLE_KIND)
             if kind == 'arc':
-                whole.add(it.data(0, ROLE_ARC))
+                p['whole'].add(it.data(0, ROLE_ARC))
             elif kind == 'entry':
                 arc = it.data(0, ROLE_ARC)
-                partial.setdefault(arc, set()).add(it.data(0, ROLE_INDEX))
+                p['partial'].setdefault(arc, set()).add(it.data(0, ROLE_INDEX))
             elif kind == 'seq':
-                seq_ids.add(it.data(0, ROLE_INDEX))
+                p['seq'].add(it.data(0, ROLE_INDEX))
             elif kind == 'seqcat':
-                all_seqs = True
-        jobs = [('arc', a, None) for a in sorted(whole)]
-        jobs += [('arc', a, idxs) for a, idxs in sorted(partial.items())
-            if a not in whole]
-        if all_seqs:
-            jobs.append(('seq', None, None))
-        elif seq_ids:
-            jobs.append(('seq', None, seq_ids))
+                p['all_seqs'] = True
+        jobs = []
+        for sk, p in per_sdat.items():
+            for a in sorted(p['whole']):
+                jobs.append((sk, 'arc', a, None))
+            for a, idxs in sorted(p['partial'].items()):
+                if a not in p['whole']:
+                    jobs.append((sk, 'arc', a, idxs))
+            if p['all_seqs']:
+                jobs.append((sk, 'seq', None, None))
+            elif p['seq']:
+                jobs.append((sk, 'seq', None, p['seq']))
         return jobs
 
     def export_selection(self):
         jobs = self._selected_jobs()
         if not jobs:
             QMessageBox.information(
-                self,'DualRip',
+                self, 'DualRip',
                 'Select entries, archives or sequences first (Ctrl/Shift-click for multiple).',
             )
             return
         self._open_export(jobs)
 
     def export_all(self):
-        jobs = [('arc', i, None) for i, _n, _c in self.sdat.seqarc_list]
-        if self.sdat.sequence_list:
-            jobs.append(('seq', None, None))
+        jobs = []
+        for sk, (_label, sdat) in self._sdats.items():
+            for i, _n, _c in sdat.seqarc_list:
+                jobs.append((sk, 'arc', i, None))
+            if sdat.sequence_list:
+                jobs.append((sk, 'seq', None, None))
         self._open_export(jobs)
 
     def _open_export(self, jobs):
         self.settings = load_settings()
-        dlg = ExportDialog(self.sdat, jobs, self.settings['rate'], self._override_map(), self)
+        dlg = ExportDialog(self._sdats, jobs, self.settings['rate'], self._override_map(), self)
         dlg.exec()
 
     def show_settings(self):

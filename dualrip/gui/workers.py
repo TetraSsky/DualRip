@@ -335,9 +335,10 @@ class BatchWorker(_ThreadWorker):
     """Rip a list of tagged jobs to disk, with per-entry progress, per-job
     summaries and cancellation.
 
-    Each job is (kind, ident, sel):
-      ('arc', arc_id, only_set_or_None)  -> one SSAR archive
-      ('seq', None, seq_set_or_None)     -> standalone SSEQ music (None = all)
+    sdats: OrderedDict[sdat_key, (label, SdatFile)]
+    Each job is (sdat_key, kind, ident, sel):
+      ('arc', arc_id, only_set_or_None) -> one SSAR archive
+      ('seq', None, seq_set_or_None) -> standalone SSEQ music (None = all)
     """
 
     batch_progress = Signal(int, int, object) # done, total, RenderResult
@@ -345,9 +346,9 @@ class BatchWorker(_ThreadWorker):
     batch_done = Signal(object) # list of summaries
     failed = Signal(str)
 
-    def __init__(self, sdat, jobs, out_root, rate, override_map=None, parent=None):
+    def __init__(self, sdats, jobs, out_root, rate, override_map=None, parent=None):
         super().__init__(parent)
-        self._sdat = sdat
+        self._sdats = sdats
         self._jobs = jobs
         self._out_root = out_root
         self._rate = rate
@@ -357,34 +358,39 @@ class BatchWorker(_ThreadWorker):
     def cancel(self):
         self._cancel.set()
 
-    def _seq_ids(self, sel):
+    def _sdat(self, sk):
+        return self._sdats[sk][1]
+
+    def _seq_ids(self, sk, sel):
         if sel is not None:
             return sorted(sel)
-        return [sid for sid, _n, _b in self._sdat.sequence_list]
+        sdat = self._sdat(sk)
+        return [sid for sid, _n, _b in sdat.sequence_list]
 
-    def _job_size(self, kind, ident, sel):
+    def _job_size(self, sk, kind, ident, sel):
         if kind == 'seq':
-            return len(self._seq_ids(sel))
+            return len(self._seq_ids(sk, sel))
         if sel is not None:
             return len(sel)
-        return len(self._sdat.seqarc(ident).entries)
+        return len(self._sdat(sk).seqarc(ident).entries)
 
     def _run(self):
         try:
             summaries = []
-            grand_total = sum(self._job_size(*j) for j in self._jobs)
+            grand_total = sum(self._job_size(j[0], j[1], j[2], j[3]) for j in self._jobs)
             base = 0
-            for kind, ident, sel in self._jobs:
+            for sk, kind, ident, sel in self._jobs:
                 if self._cancel.is_set():
                     break
+                sdat = self._sdat(sk)
 
                 def progress(done, _total, res, _base=base):
                     self._emit(self.batch_progress, _base + done, grand_total, res)
 
                 if kind == 'seq':
                     summary = rip_sequences(
-                        self._sdat,
-                        self._seq_ids(sel),
+                        sdat,
+                        self._seq_ids(sk, sel),
                         self._out_root,
                         rate=self._rate,
                         override_map=self._override,
@@ -393,7 +399,7 @@ class BatchWorker(_ThreadWorker):
                     )
                 else:
                     summary = rip_archive(
-                        self._sdat,
+                        sdat,
                         ident,
                         self._out_root,
                         rate=self._rate,
@@ -404,7 +410,7 @@ class BatchWorker(_ThreadWorker):
                     )
                 summaries.append(summary)
                 self._emit(self.archive_done, summary)
-                base += self._job_size(kind, ident, sel)
+                base += self._job_size(sk, kind, ident, sel)
             self._emit(self.batch_done, summaries)
         except Exception as exc:
             self._emit(self.failed, str(exc))
