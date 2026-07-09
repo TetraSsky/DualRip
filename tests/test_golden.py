@@ -1,4 +1,5 @@
-"""Golden fidelity tests — any engine change that alters audio shows up here.
+"""
+Golden fidelity tests — any engine change that alters audio shows up here.
 
 Requires DUALRIP_TEST_SDAT env var pointing to a real sound_data.sdat.
 """

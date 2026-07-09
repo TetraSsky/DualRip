@@ -1,6 +1,9 @@
-"""Playback bar widget (seek slider, loop toggle, Play/Pause/Stop)."""
+"""
+Playback bar widget (seek slider, loop toggle, Play/Pause/Stop).
+"""
 
 from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QPainter
 from PySide6.QtWidgets import (
     QCheckBox,
     QFrame,
@@ -12,14 +15,38 @@ from PySide6.QtWidgets import (
     QStyleOptionSlider,
     QVBoxLayout,
 )
-
 from . import audio
 
-POLL_MS = 40  # playhead refresh period
-
+POLL_MS = 40 # playhead refresh period
 
 class SeekSlider(QSlider):
-    """Slider that seeks to clicked position (default QSlider pages)."""
+    """Slider with click-to-seek + buffered-progress band underneath."""
+
+    def __init__(self, *args):
+        super().__init__(*args)
+        self._buffered_frac = 1.0
+
+    def set_buffered_fraction(self, frac):
+        frac = 0.0 if frac < 0.0 else (1.0 if frac > 1.0 else frac)
+        if abs(frac - self._buffered_frac) > 0.002 or (
+            (frac >= 1.0) != (self._buffered_frac >= 1.0)
+        ):
+            self._buffered_frac = frac
+            self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self._buffered_frac >= 1.0 or self.maximum() <= 0:
+            return
+        opt = QStyleOptionSlider()
+        self.initStyleOption(opt)
+        groove = self.style().subControlRect(
+            QStyle.CC_Slider, opt, QStyle.SC_SliderGroove, self)
+        color = self.palette().highlight().color()
+        color.setAlpha(90)
+        painter = QPainter(self)
+        painter.fillRect(groove.x(), groove.bottom() + 2, int(groove.width() * self._buffered_frac), 2, color)
+        painter.end()
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -37,9 +64,8 @@ class SeekSlider(QSlider):
                 self.setValue(value)
         super().mousePressEvent(event)
 
-
 class PlayerBar(QFrame):
-    play_clicked = Signal()   # the main window decides what to (re)render
+    play_clicked = Signal() # the main window decides what to (re)render
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -56,9 +82,7 @@ class PlayerBar(QFrame):
         self.slider.sliderMoved.connect(self._drag_moved)
         top.addWidget(self.slider, 1)
         self.chk_loop = QCheckBox('Loop', self)
-        self.chk_loop.setToolTip(
-            "Loop playback; uses the sound's own loop points when it has "
-            'some, otherwise the whole sound.')
+        self.chk_loop.setToolTip("Loop playback; uses the sound's own loop points when it has some, otherwise the whole sound.")
         self.chk_loop.toggled.connect(audio.set_loop)
         top.addWidget(self.chk_loop)
 
@@ -76,10 +100,23 @@ class PlayerBar(QFrame):
         self.btn_stop = QPushButton('Stop', self)
         self.btn_stop.clicked.connect(audio.stop)
         bottom.addWidget(self.btn_play)
-        bottom.addStretch(1)
         bottom.addWidget(self.btn_pause)
-        bottom.addStretch(1)
         bottom.addWidget(self.btn_stop)
+        bottom.addStretch(1)
+
+        self.vol_slider = QSlider(Qt.Horizontal, self)
+        self.vol_slider.setRange(0, 100)
+        self.vol_slider.setValue(int(audio.volume() * 100))
+        self.vol_slider.setFixedWidth(100)
+        self.vol_slider.valueChanged.connect(lambda v: (
+            audio.set_volume(v / 100.0),
+            self.vol_lbl.setText(f'{v}%'),
+        ))
+        self.vol_lbl = QLabel('100%', self)
+        self.vol_lbl.setFixedWidth(36)
+        self.vol_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        bottom.addWidget(self.vol_slider)
+        bottom.addWidget(self.vol_lbl)
 
         lay = QVBoxLayout(self)
         lay.addLayout(top)
@@ -97,9 +134,7 @@ class PlayerBar(QFrame):
         marks = None
         if res.loop_start is not None:
             marks = (round(res.loop_start * rate), round(res.loop_end * rate))
-        if not audio.load(res.audio, rate,
-                          marks[0] if marks else None,
-                          marks[1] if marks else None):
+        if not audio.load(res.audio, rate, marks[0] if marks else None, marks[1] if marks else None):
             return False
         self.loaded_key = key
         self._rate = rate
@@ -109,6 +144,24 @@ class PlayerBar(QFrame):
         self._timer.start()
         self._poll()
         return True
+
+    def begin_stream(self, key, rate):
+        """Arm bar for streaming render. Full-track estimate arrives in ~300ms (sequencer-only), then exact total snaps at finalize."""
+        self.loaded_key = key
+        self._rate = rate
+        self.slider.setRange(0, 0)
+        self.slider.set_buffered_fraction(0.0)
+        self._timer.start()
+        self._poll()
+
+    def begin_live(self, key, rate):
+        """Arm bar for live (ring) music render. Whole track seekable from start via checkpoints — no buffered band, drag jumps instantly."""
+        self.loaded_key = key
+        self._rate = rate
+        self.slider.setRange(0, 0)
+        self.slider.set_buffered_fraction(1.0)
+        self._timer.start()
+        self._poll()
 
     def resume(self):
         audio.play()
@@ -120,7 +173,7 @@ class PlayerBar(QFrame):
         self.slider.setRange(0, 0)
         self.lbl_time.setText('-')
 
-    def setEnabled(self, enabled):  # noqa: N802 (Qt override)
+    def setEnabled(self, enabled): # noqa: N802 (Qt override)
         super().setEnabled(enabled and audio.available())
 
     def _fmt(self, frames):
@@ -130,12 +183,21 @@ class PlayerBar(QFrame):
 
     def _poll(self):
         total = audio.duration()
+        buffered = audio.buffered()
         pos = audio.position()
+        final = audio.is_final()
+        self.slider.setRange(0, max(total - 1, 0))
+        self.slider.set_buffered_fraction(
+            1.0 if final or not total else buffered / total)
         if not self._dragging:
             self.slider.setValue(pos)
-            self.lbl_time.setText(
-                f'{self._fmt(pos)} / {self._fmt(total)} s'
-                if total else '-')
+            if not total:
+                self.lbl_time.setText('-')
+            else:
+                text = f'{self._fmt(pos)} / {self._fmt(total)} s'
+                if not final and pos >= buffered:
+                    text += ' (rendering...)'
+                self.lbl_time.setText(text)
 
     def _drag_started(self):
         self._dragging = True
@@ -146,4 +208,7 @@ class PlayerBar(QFrame):
 
     def _drag_finished(self):
         self._dragging = False
-        audio.seek(self.slider.value())
+        if audio.is_live():
+            audio.request_seek(self.slider.value())
+        else:
+            audio.seek(self.slider.value())

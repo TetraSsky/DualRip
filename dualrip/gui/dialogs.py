@@ -1,4 +1,6 @@
-"""DualRip dialogs: Settings and the Export confirmation/log window."""
+"""
+DualRip dialogs: Settings and the Export confirmation/log window.
+"""
 
 import os
 
@@ -19,15 +21,13 @@ from PySide6.QtWidgets import (
     QPushButton,
     QVBoxLayout,
 )
-
 from ..bankmap import parse_bank_map
 from .workers import BatchWorker
 
-RATES = ('32728', '44100', '48000')  # presets; the combo stays editable
+RATES = ('32728', '44100', '48000') # presets; combo stays editable
 RATE_MIN, RATE_MAX = 8000, 192000
 EXPORT_DIALOG_SIZE = (680, 460)
-LOG_MAX_LINES = 20000  # keep huge batches from growing the log unbounded
-
+LOG_MAX_LINES = 20000 # prevent unbounded log growth on huge batches
 
 def load_settings():
     s = QSettings('DualRip', 'DualRip')
@@ -41,14 +41,13 @@ def load_settings():
         'bank_map': s.value('bank_map', '') or '',
     }
 
-
 def save_settings(values):
     s = QSettings('DualRip', 'DualRip')
     for k, v in values.items():
         s.setValue(k, v)
 
-
 class SettingsDialog(QDialog):
+    """Output folder, sample rate, bank-map override."""
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle('Settings')
@@ -76,12 +75,7 @@ class SettingsDialog(QDialog):
         self.ed_map.setPlaceholderText('e.g. 4=32+33+43,30=6  (empty = automatic)')
         form.addRow('Bank map override', self.ed_map)
 
-        hint = QLabel(
-            'Bank map replaces the automatic resolution of NULL/'
-            'dynamic bank slots. Candidates separated by "+" are '
-            'tried in order; the first bank able to play all the '
-            "entry's instruments wins."
-        )
+        hint = QLabel('Bank map replaces the automatic resolution of NULL/ dynamic bank slots. Candidates separated by "+" are tried in order; the first bank able to play all the entry\'s instruments wins.')
         hint.setWordWrap(True)
         hint.setStyleSheet('color: gray;')
 
@@ -121,18 +115,19 @@ class SettingsDialog(QDialog):
         )
         self.accept()
 
-
 class ExportDialog(QDialog):
-    """Confirmation + live log window for a batch export.
+    """
+    Confirmation + live log window for a batch export.
 
-    jobs: [(arc_id, only_indices_or_None)]
+    sdats: OrderedDict[sdat_key, (label, SdatFile)]
+    jobs: [(sdat_key, kind, ident, sel)] where kind is 'arc' (ident=arc_id) or 'seq' (ident=None); sel is a set of indices/ids or None for all.
     """
 
-    def __init__(self, sdat, jobs, rate, override_map, parent=None):
+    def __init__(self, sdats, jobs, rate, override_map, parent=None):
         super().__init__(parent)
         self.setWindowTitle('Export')
         self.resize(*EXPORT_DIALOG_SIZE)
-        self._sdat = sdat
+        self._sdats = sdats
         self._jobs = jobs
         self._rate = rate
         self._override = override_map
@@ -142,10 +137,8 @@ class ExportDialog(QDialog):
 
         lay = QVBoxLayout(self)
 
-        total = sum(
-            len(only) if only is not None else len(sdat.seqarc(a).entries) for a, only in jobs
-        )
-        self.lbl_summary = QLabel(f'{total} entries from {len(jobs)} archive(s), {rate} Hz')
+        total = sum(self._job_size(sk, kind, ident, sel) for sk, kind, ident, sel in jobs)
+        self.lbl_summary = QLabel(f'{total} items from {len(jobs)} group(s), {rate} Hz')
         lay.addWidget(self.lbl_summary)
 
         row = QHBoxLayout()
@@ -179,18 +172,44 @@ class ExportDialog(QDialog):
         btns.addWidget(self.btn_cancel)
         lay.addLayout(btns)
 
+    def _sdat(self, sk):
+        """Return the SdatFile for sdat_key sk."""
+        return self._sdats[sk][1]
+
+    def _all_seq_ids(self, sk):
+        sdat = self._sdat(sk)
+        return [sid for sid, _n, _b in sdat.sequence_list]
+
+    def _job_size(self, sk, kind, ident, sel):
+        sdat = self._sdat(sk)
+        if kind == 'seq':
+            return len(sel) if sel is not None else len(self._all_seq_ids(sk))
+        if sel is not None:
+            return len(sel)
+        return len(sdat.seqarc(ident).entries)
+
     def _plan(self):
         self.log.appendPlainText('Export :')
-        for arc_id, only in self._jobs:
-            seqarc = self._sdat.seqarc(arc_id)
-            if only is None:
-                self.log.appendPlainText(
-                    f'  {arc_id:03d} {seqarc.name} - all {len(seqarc.entries)} entries'
-                )
+        for sk, kind, ident, sel in self._jobs:
+            sdat = self._sdat(sk)
+            sdat_label = self._sdats[sk][0]
+            if kind == 'seq':
+                seq_names = {sid: name for sid, name, _b in sdat.sequence_list}
+                ids = sorted(sel) if sel is not None else self._all_seq_ids(sk)
+                if sel is None:
+                    self.log.appendPlainText(f'[{sdat_label}] SSEQ (music) - all {len(ids)} sequences')
+                else:
+                    self.log.appendPlainText(f'[{sdat_label}] SSEQ (music) - {len(ids)} sequences:')
+                    for sid in ids:
+                        self.log.appendPlainText(f'[{sid:3d}] {seq_names.get(sid, sid)}')
             else:
-                self.log.appendPlainText(f'  {arc_id:03d} {seqarc.name} - {len(only)} entries:')
-                for idx in sorted(only):
-                    self.log.appendPlainText(f'      [{idx:3d}] {seqarc.entries[idx].name}')
+                seqarc = sdat.seqarc(ident)
+                if sel is None:
+                    self.log.appendPlainText(f'[{sdat_label}] {ident:03d} {seqarc.name} - all {len(seqarc.entries)} entries')
+                else:
+                    self.log.appendPlainText(f'[{sdat_label}] {ident:03d} {seqarc.name} - {len(sel)} entries:')
+                    for idx in sorted(sel):
+                        self.log.appendPlainText(f'[{idx:3d}] {seqarc.entries[idx].name}')
         self.log.appendPlainText('')
 
     def _browse(self):
@@ -208,7 +227,7 @@ class ExportDialog(QDialog):
         self.ed_out.setEnabled(False)
         self.progress.setVisible(True)
         self.log.appendPlainText(f'Exporting to {out}')
-        self._worker = BatchWorker(self._sdat, self._jobs, out, self._rate, self._override)
+        self._worker = BatchWorker(self._sdats, self._jobs, out, self._rate, self._override)
         self._worker.batch_progress.connect(self._on_progress)
         self._worker.archive_done.connect(self._on_archive_done)
         self._worker.batch_done.connect(self._on_done)
@@ -221,7 +240,7 @@ class ExportDialog(QDialog):
         if res.status in ('ok', 'loop'):
             extra = f'{res.duration:7.2f}s'
             if res.loop_start is not None:
-                extra += f'  loop {res.loop_start:.3f}-{res.loop_end:.3f}s'
+                extra += f' loop {res.loop_start:.3f}-{res.loop_end:.3f}s'
             line = f'[{res.index:3d}] {res.name:44s} {res.status:5s} {extra}'
         elif res.status == 'error':
             line = f'[{res.index:3d}] {res.name:44s} ERROR {res.error}'

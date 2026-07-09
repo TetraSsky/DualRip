@@ -1,14 +1,9 @@
-# Part of DualRip. Core playback logic is a faithful Python port of the FeOS
-# Sound System (fincs), as adapted by Naram Qashat (CyberBotX) for the NCSF
-# player (github.com/CyberBotX/in_xsf, src/in_ncsf/SSEQPlayer). Lookup tables
-# come from disassembly of Nintendo's NNS sound driver by those authors.
-# FIDELITY-CRITICAL: C integer semantics (truncating division, arithmetic
-# shifts, table indexing) are intentional. Do not "simplify".
+# Part of DualRip. SWAR/WAV parsing + IMA-ADPCM decode. Ported from FeOS Sound
+# System (fincs) / CyberBotX/in_xsf, derived from NNS driver disassembly.
+# FIDELITY-CRITICAL: C integer semantics, table indexing are intentional.
 
 import struct
-
 import numpy as np
-
 from .common import NNS_RECORD_COUNT_OFF, NNS_RECORD_TABLE_OFF
 
 IMA_INDEX_TABLE = (-1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 6, 8)
@@ -24,8 +19,16 @@ IMA_STEP_TABLE = (
     15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767,
 )
 
-
 def decode_adpcm(raw):
+    """
+    Decode IMA-ADPCM block to int32 samples.
+
+    Args:
+        raw: bytes, 4-byte header (pred, index) + nibble-packed data.
+
+    Returns:
+        np.ndarray[int32] of decoded samples.
+    """
     pred = struct.unpack_from('<h', raw, 0)[0]
     index = min(struct.unpack_from('<H', raw, 2)[0], 88)
     n = len(raw) - 4
@@ -60,7 +63,6 @@ def decode_adpcm(raw):
             pos += 1
     return out
 
-
 class Swav:
     __slots__ = ('waveType', 'loop', 'sampleRate', 'time', 'loopStart', 'length', 'data')
 
@@ -70,21 +72,25 @@ class Swav:
         )
         size = (loopOffset + nonLoopLength) * 4
         raw = bytes(data[off + 12 : off + 12 + size])
-        if self.waveType == 0:  # PCM8
+        if self.waveType == 0: # PCM8
             self.data = np.frombuffer(raw, dtype=np.int8).astype(np.int32) << 8
             self.loopStart = loopOffset * 4
             self.length = nonLoopLength * 4
-        elif self.waveType == 1:  # PCM16
+        elif self.waveType == 1: # PCM16
             self.data = np.frombuffer(raw[: 2 * (size // 2)], dtype='<i2').astype(np.int32)
             self.loopStart = loopOffset * 2
             self.length = nonLoopLength * 2
-        else:  # IMA-ADPCM
+        else: # IMA-ADPCM
             self.data = decode_adpcm(raw)
             self.loopStart = (loopOffset - 1) * 8 if loopOffset else 0
             self.length = nonLoopLength * 8
 
+    def __deepcopy__(self, memo):
+        # SWAV data is immutable
+        return self
 
 def parse_swar(data):
+    """Parse SWAR blob, return list of Swav."""
     count = struct.unpack_from('<I', data, NNS_RECORD_COUNT_OFF)[0]
     offs = struct.unpack_from('<%dI' % count, data, NNS_RECORD_TABLE_OFF)
     return [Swav(data, off) for off in offs]

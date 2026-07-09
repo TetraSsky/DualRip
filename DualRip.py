@@ -1,4 +1,6 @@
-"""DualRip GUI launcher (PyInstaller entry point)."""
+"""
+DualRip GUI launcher (PyInstaller entry point).
+"""
 
 import sys
 

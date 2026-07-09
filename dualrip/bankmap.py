@@ -1,12 +1,8 @@
-# Part of DualRip. Core playback logic is a faithful Python port of the FeOS
-# Sound System (fincs), as adapted by Naram Qashat (CyberBotX) for the NCSF
-# player (github.com/CyberBotX/in_xsf, src/in_ncsf/SSEQPlayer). Lookup tables
-# come from disassembly of Nintendo's NNS sound driver by those authors.
-# FIDELITY-CRITICAL: C integer semantics (truncating division, arithmetic
-# shifts, table indexing) are intentional. Do not "simplify".
+# Part of DualRip. Bank resolution — static patch scanner + auto-mapping for
+# NULL/dynamic bank slots via family-affinity + exclusivity-weighted coverage.
+# FIDELITY-CRITICAL: SSEQ bytecode walk must be exact.
 
 from collections import Counter
-
 from .engine.sequencer import (
     EXTRA_BYTE,
     SSEQ_CMD_CALL,
@@ -24,8 +20,7 @@ from .engine.sequencer import (
     sseq_command_byte_count,
 )
 
-MAX_SCAN_STEPS = 2000  # per-branch safety bound for malformed bytecode
-
+MAX_SCAN_STEPS = 2000 # per-branch safety bound for malformed bytecode
 
 def scan_patches(blob, off):
     """Static scan of the patches (instrument numbers) a sequence entry uses."""
@@ -45,7 +40,7 @@ def scan_patches(blob, off):
             elif cmd == SSEQ_CMD_PATCH:
                 v, pc = readvl(blob, pc)
                 out.add(v)
-            elif cmd < SSEQ_NOTE_LIMIT:  # note-on: velocity + varlen length
+            elif cmd < SSEQ_NOTE_LIMIT: # note-on: velocity + varlen length
                 pc += 1
                 _v, pc = readvl(blob, pc)
             elif cmd == SSEQ_CMD_OPEN_TRACK:
@@ -70,11 +65,13 @@ def scan_patches(blob, off):
     # a sequence with no PATCH command plays with the default patch 0
     return out or {0}
 
-
 def patch_playable(entries, slot_sizes, p):
-    """True if patch p exists and all its instruments can actually resolve
-    their sample (wave archive slot present and wave index in range).
-    slot_sizes: number of waves in each of the bank's 4 wave archive slots."""
+    """
+    True if patch p resolves all instruments to valid samples.
+
+    Args:
+        slot_sizes: wave count per archive slot in the bank (length <= 4).
+    """
     if p >= len(entries) or not entries[p].record:
         return False
     for inst in entries[p].instruments:
@@ -82,7 +79,6 @@ def patch_playable(entries, slot_sizes, p):
             if inst.swar >= len(slot_sizes) or inst.swav >= slot_sizes[inst.swar]:
                 return False
     return True
-
 
 def parse_bank_map(text):
     """Parse "4=32,30=6" or "4=32+33+43" into {src: [candidates]}."""
@@ -92,7 +88,6 @@ def parse_bank_map(text):
             src, dst = pair.split('=')
             out[int(src)] = [int(x) for x in dst.split('+')]
     return out
-
 
 class BankResolver:
     """Resolve NULL/dynamic bank slots via family-affinity + coverage ranking."""
@@ -168,7 +163,7 @@ class BankResolver:
         )
 
     def coverage(self, entry, bid):
-        """Fraction of the entry's instruments playable with bank `bid`."""
+        """Fraction of entry's instruments playable with bank bid."""
         ps = self._entry_ps.get(entry.index)
         if ps is None:
             ps = scan_patches(self.seqarc.blob, entry.offset)
@@ -179,7 +174,7 @@ class BankResolver:
         return sum(1 for p in ps if patch_playable(ent, cnts, p)) / len(ps)
 
     def resolve(self, entry):
-        """Bank id to use for this entry."""
+        """Best bank id for this entry (override > auto-candidate > original)."""
         bid = entry.bank_id
         cands = self.override.get(bid)
         if not cands and bid in self.auto_bids:

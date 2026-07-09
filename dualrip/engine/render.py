@@ -1,12 +1,10 @@
-# Part of DualRip. Core playback logic is a faithful Python port of the FeOS
-# Sound System (fincs), as adapted by Naram Qashat (CyberBotX) for the NCSF
-# player (github.com/CyberBotX/in_xsf, src/in_ncsf/SSEQPlayer). Lookup tables
-# come from disassembly of Nintendo's NNS sound driver by those authors.
-# FIDELITY-CRITICAL: C integer semantics (truncating division, arithmetic
-# shifts, table indexing) are intentional. Do not "simplify".
+# Part of DualRip. Render entry points (streaming + batch) + duration estimator.
+# Faithful port of FeOS Sound System (fincs) / CyberBotX/in_xsf, derived from
+# NNS driver disassembly.
+# FIDELITY-CRITICAL: C integer semantics, clock/emit arithmetic are intentional.
 
+import copy
 import numpy as np
-
 from ..cprims import (
     CS_ATTACK,
     CS_NONE,
@@ -19,52 +17,108 @@ from ..cprims import (
 )
 from .sequencer import Player
 
+STREAM_CHUNK_SAMPLES = 8820
 
-def render_entry(blob, start_offset, bank, waveArc, entry_volume, rate, hold_seconds=2.0):
-    """Render one SSAR entry in raw form.
-    Returns (stereo int16, looped: bool, loop_marks: (start, end) samples or None).
-
-    Raw = one iteration of every loop, full release envelopes, native rests
-    preserved. PSG/noise endless notes released hold_seconds after idle.
-    Only the fixed ~15 ms sequencer warm-up is skipped.
+class LiveRenderer:
     """
-    ply = Player(blob, bank, waveArc, rate, cnv_scale(entry_volume))
-    ply.setup(start_offset)
-    ply.timer()
+    Resumable, seekable driver for one SSAR/SSEQ entry.
 
-    sps = 1.0 / rate
-    seconds_into = 0.0
-    next_clock = SECONDS_PER_CLOCK
-    out_l = []
-    out_r = []
-    total = 0
-    emitted = 0
-    # Cold-start gate. On hardware the driver is already running when a sound
-    # is triggered, so tick 0 sounds immediately; the emulator instead starts
-    # from tempoCount 0 (clocks until the first tick runs) and needs one more
-    # timer() for channel updates to arm the tick-0 note-ons. Blocks rendered
-    # before that point are pure emulation warm-up -- discard them, record
-    # from the first block that can carry tick-0 audio. Everything after
-    # (native rests included) is sequence content.
-    recording = False
-    tick0_ran = False  # ply.ticked observed before the latest timer() call
-    ended_at = None
+    Owns a Player + clock/emit bookkeeping. step(produce=True) > int16 block, step(produce=False) > silent fast-forward (bit-exact state advance).
+    snapshot()/from_snapshot() enable checkpoint+ffwd seek in live preview.
 
-    while True:
+    Raw policy: one loop iteration, full release envelopes, native rests, PSG/noise endless notes released hold_seconds after idle, ~15ms cold-start warm-up skipped. player_prio = cpr from SDAT INFO.
+    """
+
+    def __init__(self, blob, start_offset, bank, waveArc, entry_volume, rate, hold_seconds=2.0, player_prio=0):
+        self.rate = rate
+        self.hold_seconds = hold_seconds
+        self.sps = 1.0 / rate
+        self.ply = Player(blob, bank, waveArc, rate, cnv_scale(entry_volume), player_prio)
+        self.ply.setup(start_offset)
+        self.ply.timer()
+        self.seconds_into = 0.0
+        self.next_clock = SECONDS_PER_CLOCK
+        self.total = 0
+        self.emitted = 0
+        self.recording = False
+        self.tick0_ran = False
+        self.ended_at = None
+        self.finished = False
+
+    @staticmethod
+    def _share_memo(ply):
+        return {
+            id(ply.blob): ply.blob,
+            id(ply.bank): ply.bank,
+            id(ply.waveArc): ply.waveArc,
+        }
+
+    def snapshot(self):
+        """An opaque, restore-able copy of the full render state at self.emitted."""
+        ply = copy.deepcopy(self.ply, self._share_memo(self.ply))
+        return {
+            'ply': ply,
+            'rate': self.rate,
+            'hold_seconds': self.hold_seconds,
+            'seconds_into': self.seconds_into,
+            'next_clock': self.next_clock,
+            'total': self.total,
+            'emitted': self.emitted,
+            'recording': self.recording,
+            'tick0_ran': self.tick0_ran,
+            'ended_at': self.ended_at,
+            'finished': self.finished,
+        }
+
+    @classmethod
+    def from_snapshot(cls, snap):
+        """Build renderer from snapshot (copies Player, snapshot reusable)."""
+        r = cls.__new__(cls)
+        r.rate = snap['rate']
+        r.hold_seconds = snap['hold_seconds']
+        r.sps = 1.0 / snap['rate']
+        r.ply = copy.deepcopy(snap['ply'], cls._share_memo(snap['ply']))
+        r.seconds_into = snap['seconds_into']
+        r.next_clock = snap['next_clock']
+        r.total = snap['total']
+        r.emitted = snap['emitted']
+        r.recording = snap['recording']
+        r.tick0_ran = snap['tick0_ran']
+        r.ended_at = snap['ended_at']
+        r.finished = snap['finished']
+        return r
+
+    @property
+    def loop_marks(self):
+        ply = self.ply
+        if ply.loop_start_sample is not None and ply.loop_end_sample > ply.loop_start_sample:
+            return ply.loop_start_sample, ply.loop_end_sample
+        return None
+
+    def step(self, produce=True):
+        """
+        Advance one driver clock.
+
+        Returns:
+            int16 (n, 2) ndarray when producing + past warm-up gate, else None.
+        Sets self.finished at natural render end.
+        """
+        ply = self.ply
         # sequencer frozen (TEMPO 0): no tick can ever run again, so tracks
         # that are not ended never will be -- exact condition, not a time cap
         frozen = ply.tempo == 0 and ply.tempoCount < 240
         if not ply.any_channel_active() and (ply.all_tracks_ended() or frozen):
-            break
+            self.finished = True
+            return None
         # "idle": every track has ended, is suspended waiting for an endless
         # note's channel to die, or can never run again
         idle = frozen or all(
             ply.tracks[t].state[TS_END] or ply.tracks[t].waitChn for t in ply.trackIds
         )
         if idle:
-            if ended_at is None:
-                ended_at = total
-            elif total - ended_at > hold_seconds * rate:
+            if self.ended_at is None:
+                self.ended_at = self.total
+            elif self.total - self.ended_at > self.hold_seconds * self.rate:
                 # release ringing infinite notes (looped samples, PSG, noise);
                 # one-shot PCM notes die on their own at the end of the sample
                 for c in ply.channels:
@@ -76,13 +130,13 @@ def render_entry(blob, start_offset, bank, waveArc, entry_volume, rate, hold_sec
                     ):
                         c.release()
         else:
-            ended_at = None
+            self.ended_at = None
 
-        n = int((next_clock - seconds_into) / sps) + 1
+        n = int((self.next_clock - self.seconds_into) / self.sps) + 1
         if n < 1:
             n = 1
 
-        ply.now_sample = emitted
+        ply.now_sample = self.emitted
         bl = None
         br = None
         for chn in ply.channels:
@@ -90,7 +144,7 @@ def render_entry(blob, start_offset, bank, waveArc, entry_volume, rate, hold_sec
                 continue
             chn.kill_after_block = False
             chn.cut_at_wrap = chn.noteLength <= 0 and CS_ATTACK <= chn.state <= CS_SUSTAIN
-            res = chn.generate_block(n)
+            res = chn.generate_block(n, produce)
             if res is not None:
                 l, r = res
                 if bl is None:
@@ -101,34 +155,130 @@ def render_entry(blob, start_offset, bank, waveArc, entry_volume, rate, hold_sec
                     br += r
             if chn.kill_after_block:
                 chn.kill()
+        out = None
+        if self.recording:
+            if produce:
+                if bl is None:
+                    bl = np.zeros(n, dtype=np.int64)
+                    br = np.zeros(n, dtype=np.int64)
+                out = np.stack([np.clip(bl, -32768, 32767), np.clip(br, -32768, 32767)], axis=1).astype(np.int16)
+            self.emitted += n
+        self.total += n
+        self.seconds_into += n * self.sps
+        ply.now_sample = self.emitted
+        ply.timer()
+        if self.tick0_ran:
+            self.recording = True
+        self.tick0_ran = ply.ticked
+        self.next_clock += SECONDS_PER_CLOCK
+        return out
+
+    def fast_forward_to(self, target_sample):
+        """
+        Silent ffwd until emitted >= target_sample (or render ends).
+
+        Clock-granular: lands within one driver clock (~5ms) of target,
+        never before.
+        """
+        while not self.finished and self.emitted < target_sample:
+            self.step(produce=False)
+        return self.emitted
+
+
+def render_entry_stream(
+    blob,
+    start_offset,
+    bank,
+    waveArc,
+    entry_volume,
+    rate,
+    hold_seconds=2.0,
+    player_prio=0,
+    chunk_samples=STREAM_CHUNK_SAMPLES,
+):
+    """
+    Render one SSAR/SSEQ entry incrementally.
+
+    Yields ('data', int16 stereo ndarray) chunks (~STREAM_CHUNK_SAMPLES), then ('end', looped: bool, loop_marks or None). Regroups
+    LiveRenderer.step() — concatenated whole is bit-identical to a one-shot render.
+    """
+    r = LiveRenderer(blob, start_offset, bank, waveArc, entry_volume, rate, hold_seconds, player_prio)
+    pend = []
+    pend_n = 0
+    while not r.finished:
+        out = r.step(produce=True)
+        if out is not None:
+            pend.append(out)
+            pend_n += len(out)
+            if pend_n >= chunk_samples:
+                yield 'data', np.concatenate(pend)
+                pend = []
+                pend_n = 0
+    if pend_n:
+        yield 'data', np.concatenate(pend)
+    yield 'end', r.ply.loop_detected, r.loop_marks
+
+
+def estimate_end_sample(blob, start_offset, rate, player_prio=0, should_abort=None, abort_every=4096):
+    """
+    Sample index where the sequencer finishes (all tracks ended/frozen).
+
+    Runs the REAL sequencer with an empty bank — no note can allocate a channel, so only track/tempo/loop logic runs (~500-1000× faster than full render). Lower bound (release tails excluded); snap to exact total at render finalize.
+    Clock/emit arithmetic mirrors render_entry_stream (including warm-up gate) > sample-for-sample alignment.
+
+    Args:
+        should_abort: callable polled every abort_every clocks; return True
+            to abort (returns None).
+    """
+    ply = Player(blob, [], [None, None, None, None], rate, 0, player_prio)
+    ply.setup(start_offset)
+    ply.timer()
+
+    sps = 1.0 / rate
+    seconds_into = 0.0
+    next_clock = SECONDS_PER_CLOCK
+    emitted = 0
+    recording = False
+    tick0_ran = False
+    clocks = 0
+    while True:
+        frozen = ply.tempo == 0 and ply.tempoCount < 240
+        if ply.all_tracks_ended() or frozen:
+            return emitted
+        n = int((next_clock - seconds_into) / sps) + 1
+        if n < 1:
+            n = 1
         if recording:
-            if bl is None:
-                bl = np.zeros(n, dtype=np.int64)
-                br = np.zeros(n, dtype=np.int64)
-            out_l.append(bl)
-            out_r.append(br)
             emitted += n
-        total += n
         seconds_into += n * sps
         ply.now_sample = emitted
         ply.timer()
-        # ply.ticked latches once the first tick has run; the timer() call
-        # right after that (this one, when tick0_ran is already set) is the
-        # channel update that arms the tick-0 note-ons, so the next block is
-        # the first audible one.
         if tick0_ran:
             recording = True
         tick0_ran = ply.ticked
         next_clock += SECONDS_PER_CLOCK
+        clocks += 1
+        if should_abort is not None and clocks % abort_every == 0 and should_abort():
+            return None
 
+def render_entry(blob, start_offset, bank, waveArc, entry_volume, rate, hold_seconds=2.0, player_prio=0):
+    """
+    Render one SSAR/SSEQ entry → single stereo int16 buffer.
+
+    Returns:
+        (stereo int16 ndarray, looped: bool, loop_marks: (start, end) or None).
+    Bit-identical to render_entry_stream concatenation.
+    """
+    chunks = []
+    looped = False
     marks = None
-    if ply.loop_start_sample is not None and ply.loop_end_sample > ply.loop_start_sample:
-        marks = (ply.loop_start_sample, ply.loop_end_sample)
-    if not out_l:
-        return np.zeros((0, 2), dtype=np.int16), ply.loop_detected, marks
-    left = np.concatenate(out_l)
-    right = np.concatenate(out_r)
-    stereo = np.stack(
-        [np.clip(left, -32768, 32767), np.clip(right, -32768, 32767)], axis=1
-    ).astype(np.int16)
-    return stereo, ply.loop_detected, marks
+    for item in render_entry_stream(
+        blob, start_offset, bank, waveArc, entry_volume, rate, hold_seconds, player_prio
+    ):
+        if item[0] == 'data':
+            chunks.append(item[1])
+        else:
+            looped, marks = item[1], item[2]
+    if not chunks:
+        return np.zeros((0, 2), dtype=np.int16), looped, marks
+    return np.concatenate(chunks), looped, marks

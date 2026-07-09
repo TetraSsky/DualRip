@@ -1,19 +1,12 @@
-# Part of DualRip. Core playback logic is a faithful Python port of the FeOS
-# Sound System (fincs), as adapted by Naram Qashat (CyberBotX) for the NCSF
-# player (github.com/CyberBotX/in_xsf, src/in_ncsf/SSEQPlayer). Lookup tables
-# come from disassembly of Nintendo's NNS sound driver by those authors.
-# FIDELITY-CRITICAL: C integer semantics (truncating division, arithmetic
-# shifts, table indexing) are intentional. Do not "simplify".
+# Part of DualRip. WAV export + batch rip (SSAR & SSEQ).
+# FIDELITY-CRITICAL: RIFF layout, loop-point embedding, render policy.
 
 import csv
 import os
 import struct
-
 import numpy as np
-
 from .bankmap import BankResolver
 from .engine.render import render_entry
-
 
 def write_wav(path, stereo, rate, loop=None):
     """Minimal RIFF writer; embeds loop points as a standard `smpl` chunk."""
@@ -23,7 +16,7 @@ def write_wav(path, stereo, rate, loop=None):
     chunks = [(b'fmt ', fmt), (b'data', data)]
     if loop is not None:
         start, end = int(loop[0]), int(loop[1])
-        end = max(end - 1, start)  # smpl dwEnd is the last sample included
+        end = max(end - 1, start) # smpl dwEnd is the last sample included
         # smpl header: manufacturer, product, sample period (ns), MIDI unity
         # note (middle C), pitch fraction, SMPTE format/offset, 1 loop, 0 extra
         smpl = struct.pack('<9I', 0, 0, 1000000000 // rate, 60, 0, 0, 0, 1, 0)
@@ -38,10 +31,8 @@ def write_wav(path, stereo, rate, loop=None):
     with open(path, 'wb') as f:
         f.write(b'RIFF' + struct.pack('<I', 4 + len(payload)) + b'WAVE' + payload)
 
-
 def sanitize(name):
     return ''.join(c if c.isalnum() or c in '_-' else '_' for c in name)
-
 
 class RenderResult:
     """Outcome of rendering one entry (audio kept in memory)."""
@@ -72,14 +63,13 @@ class RenderResult:
     ):
         self.index = index
         self.name = name
-        self.status = status  # ok | loop | empty | null | error
+        self.status = status # ok | loop | empty | null | error
         self.bank_label = bank_label
         self.duration = duration
-        self.loop_start = loop_start  # seconds, or None
+        self.loop_start = loop_start # seconds, or None
         self.loop_end = loop_end
-        self.audio = audio  # int16 stereo ndarray, or None
+        self.audio = audio # int16 stereo ndarray, or None
         self.error = error
-
 
 def render_one(sdat, seqarc, entry, rate=44100, resolver=None):
     """Render one entry in memory (no I/O)."""
@@ -92,7 +82,7 @@ def render_one(sdat, seqarc, entry, rate=44100, resolver=None):
         label = str(entry.bank_id) if rbid == entry.bank_id else f'{entry.bank_id}->{rbid}'
         bank, wave_arc = sdat.bank(rbid)
         audio, looped, marks = render_entry(
-            seqarc.blob, entry.offset, bank, wave_arc, entry.volume, rate
+            seqarc.blob, entry.offset, bank, wave_arc, entry.volume, rate, player_prio=entry.cpr or 0
         )
         peak = int(np.abs(audio.astype(np.int32)).max()) if len(audio) else 0
         if len(audio) == 0 or peak == 0:
@@ -109,8 +99,98 @@ def render_one(sdat, seqarc, entry, rate=44100, resolver=None):
             le,
             audio,
         )
-    except Exception as exc:  # keep ripping the rest of the archive
+    except Exception as exc: # keep ripping the rest of the archive
         return RenderResult(entry.index, entry.name, 'error', str(entry.bank_id), error=str(exc))
+
+def _manifest_row(index, res, entry_volume):
+    """One manifest.csv row shared by the SSAR and SSEQ writers."""
+    return [
+        index,
+        res.name,
+        res.bank_label,
+        '' if entry_volume is None else entry_volume,
+        (
+            round(res.duration, 3)
+            if res.status in ('ok', 'loop')
+            else (0.0 if res.status == 'empty' else '')
+        ),
+        round(res.loop_start, 3) if res.loop_start is not None else '',
+        round(res.loop_end, 3) if res.loop_end is not None else '',
+        res.status if res.status != 'error' else f'ERROR: {res.error}',
+    ]
+
+MANIFEST_HEADER = [
+    'index',
+    'name',
+    'bank',
+    'entry_volume',
+    'duration_s',
+    'loop_start_s',
+    'loop_end_s',
+    'status',
+]
+
+def rip_sequences(
+    sdat,
+    seq_ids,
+    out_root,
+    rate=44100,
+    override_map=None,
+    progress=None,
+    should_cancel=None,
+):
+    """
+    Rip standalone SSEQ music > WAV + manifest.csv in SSEQ/ subfolder.
+
+    Each sequence is a one-entry SeqArc > same render_one path (raw policy, cpr channel priority, loop marks).
+
+    Args:
+        progress: callable(done, total, RenderResult) per sequence.
+        should_cancel: callable() > True aborts cleanly.
+    """
+    out_dir = os.path.join(out_root, 'SSEQ')
+    os.makedirs(out_dir, exist_ok=True)
+
+    manifest = []
+    counts = {'ok': 0, 'loop': 0, 'empty': 0, 'null': 0, 'error': 0}
+    note = None
+    cancelled = False
+    for done, sid in enumerate(seq_ids, 1):
+        seqarc = sdat.sequence(sid)
+        entry = seqarc.entries[0]
+        resolver = BankResolver(sdat, seqarc, override_map)
+        if note is None and resolver.note:
+            note = resolver.note
+        res = render_one(sdat, seqarc, entry, rate, resolver)
+        counts[res.status] += 1
+        if res.status in ('ok', 'loop'):
+            fn = f'{sid:03d}_{sanitize(res.name)}.wav'
+            marks = None
+            if res.loop_start is not None:
+                marks = (round(res.loop_start * rate), round(res.loop_end * rate))
+            write_wav(os.path.join(out_dir, fn), res.audio, rate, loop=marks)
+        manifest.append(_manifest_row(sid, res, entry.volume))
+        res.audio = None # free memory during long batches
+        if progress is not None:
+            progress(done, len(seq_ids), res)
+        if should_cancel is not None and should_cancel():
+            cancelled = True
+            break
+
+    with open(os.path.join(out_dir, 'manifest.csv'), 'w', newline='', encoding='utf-8') as f:
+        w = csv.writer(f)
+        w.writerow(MANIFEST_HEADER)
+        w.writerows(manifest)
+
+    return {
+        'arc_id': 'SSEQ',
+        'arc_name': 'SSEQ (music)',
+        'out_dir': out_dir,
+        'note': note,
+        'cancelled': cancelled,
+        'total': len(seq_ids),
+        **counts,
+    }
 
 
 def rip_archive(
@@ -146,23 +226,8 @@ def rip_archive(
             if res.loop_start is not None:
                 marks = (round(res.loop_start * rate), round(res.loop_end * rate))
             write_wav(os.path.join(out_dir, fn), res.audio, rate, loop=marks)
-        manifest.append(
-            [
-                entry.index,
-                res.name,
-                res.bank_label,
-                '' if entry.volume is None else entry.volume,
-                (
-                    round(res.duration, 3)
-                    if res.status in ('ok', 'loop')
-                    else (0.0 if res.status == 'empty' else '')
-                ),
-                round(res.loop_start, 3) if res.loop_start is not None else '',
-                round(res.loop_end, 3) if res.loop_end is not None else '',
-                res.status if res.status != 'error' else f'ERROR: {res.error}',
-            ]
-        )
-        res.audio = None  # free memory during long batches
+        manifest.append(_manifest_row(entry.index, res, entry.volume))
+        res.audio = None # free memory during long batches
         if progress is not None:
             progress(done, len(todo), res)
         if should_cancel is not None and should_cancel():
@@ -171,18 +236,7 @@ def rip_archive(
 
     with open(os.path.join(out_dir, 'manifest.csv'), 'w', newline='', encoding='utf-8') as f:
         w = csv.writer(f)
-        w.writerow(
-            [
-                'index',
-                'name',
-                'bank',
-                'entry_volume',
-                'duration_s',
-                'loop_start_s',
-                'loop_end_s',
-                'status',
-            ]
-        )
+        w.writerow(MANIFEST_HEADER)
         w.writerows(manifest)
 
     return {

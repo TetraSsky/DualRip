@@ -1,4 +1,5 @@
-"""SDAT container access for DualRip.
+"""
+SDAT container access for DualRip.
 
 This is the ONLY module that touches ndspy. Everything else works on plain
 Python/numpy structures, so the container backend can be swapped or
@@ -6,9 +7,7 @@ internalized later without touching the engine.
 """
 
 import struct
-
 import ndspy.soundArchive
-
 from .common import (
     BANK_WAVE_ARCHIVE_SLOTS,
     NNS_RECORD_COUNT_OFF,
@@ -17,28 +16,31 @@ from .common import (
 from .sbnk import parse_sbnk
 from .swar import parse_swar
 
-
 def _swar_wave_count(war):
     """Number of waves in an ndspy wave archive, without decoding samples."""
     raw = bytes(war.save()[0][: NNS_RECORD_COUNT_OFF + 4])
     return struct.unpack_from('<I', raw, NNS_RECORD_COUNT_OFF)[0]
 
-
 class SeqArcEntry:
     """One sound entry of a sequence archive (SSAR)."""
 
-    __slots__ = ('index', 'name', 'bank_id', 'volume', 'offset')
+    __slots__ = ('index', 'name', 'bank_id', 'volume', 'cpr', 'offset')
 
-    def __init__(self, index, name, bank_id, volume, offset):
+    def __init__(self, index, name, bank_id, volume, cpr, offset):
         self.index = index
         self.name = name
         self.bank_id = bank_id
         self.volume = volume
-        self.offset = offset  # None for null/placeholder slots
-
+        self.cpr = cpr # channel-priority base the game passes at runtime
+        self.offset = offset # None for null/placeholder slots
 
 class SeqArc:
-    """A sequence archive: shared event blob + entry table."""
+    """
+    Sequence archive: shared event blob + entry table.
+
+    Standalone SSEQ is modelled as a one-entry SeqArc with arc_id ('SSEQ', seq_id) — flows through the same render_one / BankResolver
+    Path as SSAR, zero special casing in the engine.
+    """
 
     __slots__ = ('arc_id', 'name', 'blob', 'entries')
 
@@ -48,6 +50,9 @@ class SeqArc:
         self.blob = blob
         self.entries = entries
 
+# SSEQ header: 16 bytes, then DATA block. Offset at 0x18 points to song events.
+# Playback starts at blob[0:] like an SSAR with offset 0.
+SSEQ_EVENTS_PTR_OFF = 0x18
 
 class SdatFile:
     """Read-only view over a sound_data.sdat with lazy, cached parsing."""
@@ -56,9 +61,23 @@ class SdatFile:
         self.path = path
         self._sdat = ndspy.soundArchive.SDAT.fromFile(path)
         self._seqarc_cache = {}
+        self._seq_cache = {}
         self._bank_cache = {}
         self._meta_cache = {}
         self._swar_cache = {}
+
+    @classmethod
+    def from_bytes(cls, data: bytes, label: str = '<ROM>') -> 'SdatFile':
+        """Construct an SdatFile from raw SDAT bytes (e.g. extracted from a .nds ROM)."""
+        inst = cls.__new__(cls)
+        inst.path = label
+        inst._sdat = ndspy.soundArchive.SDAT(data)
+        inst._seqarc_cache = {}
+        inst._seq_cache = {}
+        inst._bank_cache = {}
+        inst._meta_cache = {}
+        inst._swar_cache = {}
+        return inst
 
     @property
     def seqarc_list(self):
@@ -77,7 +96,7 @@ class SdatFile:
             entries = []
             for idx, (sname, seq) in enumerate(arc.sequences):
                 if seq is None or seq.firstEventOffset is None:
-                    entries.append(SeqArcEntry(idx, sname or f'SEQ_{idx}', None, None, None))
+                    entries.append(SeqArcEntry(idx, sname or f'SEQ_{idx}', None, None, None, None))
                 else:
                     entries.append(
                         SeqArcEntry(
@@ -85,6 +104,7 @@ class SdatFile:
                             sname or f'SEQ_{idx}',
                             seq.bankID,
                             seq.volume,
+                            seq.channelPressure, # ndspy's name for cpr
                             seq.firstEventOffset,
                         )
                     )
@@ -102,6 +122,25 @@ class SdatFile:
                 out.append((i, name or f'SSEQ_{i}', getattr(seq, 'bankID', None)))
         return out
 
+    def sequence(self, seq_id):
+        """
+        Standalone SSEQ as a one-entry SeqArc (arc_id=('SSEQ', seq_id)).
+
+        Entry index = seq_id (used for filenames/manifests), offset = 0
+        (SSEQ carries only its own events, no shared blob).
+        """
+        if seq_id not in self._seq_cache:
+            name, seq = self._sdat.sequences[seq_id]
+            if seq is None:
+                raise ValueError(f'sequence {seq_id} is null')
+            raw = bytes(seq.save()[0])
+            ev_off = struct.unpack_from('<I', raw, SSEQ_EVENTS_PTR_OFF)[0]
+            blob = raw[ev_off:]
+            sname = name or f'SSEQ_{seq_id}'
+            entry = SeqArcEntry(seq_id, sname, seq.bankID, seq.volume, seq.channelPressure, 0)
+            self._seq_cache[seq_id] = SeqArc(('SSEQ', seq_id), sname, blob, [entry])
+        return self._seq_cache[seq_id]
+
     @property
     def bank_list(self):
         """[(bank_id, name_or_None, wave_archive_ids_or_None)]; None ids for
@@ -111,8 +150,7 @@ class SdatFile:
             if bnk is None:
                 out.append((i, name, None))
             else:
-                out.append((i, name or f'BANK_{i}',
-                            list(bnk.waveArchiveIDs)[:BANK_WAVE_ARCHIVE_SLOTS]))
+                out.append((i, name or f'BANK_{i}', list(bnk.waveArchiveIDs)[:BANK_WAVE_ARCHIVE_SLOTS]))
         return out
 
     @property
@@ -137,8 +175,7 @@ class SdatFile:
         return not 0 <= bid < len(self._sdat.banks) or self._sdat.banks[bid][1] is None
 
     def _bank_slot_ids(self, bnk):
-        """The bank's wave archive ids, normalized to exactly
-        BANK_WAVE_ARCHIVE_SLOTS entries with None for empty/invalid slots."""
+        """Wave archive IDs for this bank, normalized to BANK_WAVE_ARCHIVE_SLOTS entries (None = empty/invalid/NO_WAVE_ARCHIVE sentinel)."""
         wids = []
         for wid in list(bnk.waveArchiveIDs)[:BANK_WAVE_ARCHIVE_SLOTS]:
             if (
@@ -154,8 +191,7 @@ class SdatFile:
         return wids
 
     def bank_meta(self, bid):
-        """(patch entries, wave counts per slot, wave archive ids) without
-        decoding any sample, or None for a null bank."""
+        """Return (patch entries, wave counts per slot, wave archive ids) without decoding samples. None for null banks."""
         if bid not in self._meta_cache:
             if self.bank_is_null(bid):
                 self._meta_cache[bid] = None
