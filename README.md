@@ -9,6 +9,14 @@ Rips Nintendo DS sound effects (SSAR) & music (SSEQ) inside `sound_data.sdat` to
 
 ## Screenshots
 
+Open a `.nds` ROM: pick one or more SDATs from the selection dialog (Ctrl/Shift-click for multiple):
+
+![Multi-SDAT import](docs/multi-sdat-import.png)
+
+Browse multiple SDATs side-by-side, grouped by archive:
+
+![Per-SDAT layout](docs/per-sdat-preview.png)
+
 Browse the SDAT, preview sound effects with the built-in player (seek, pause, loop on the sound's own loop points):
 
 ![Archive preview](docs/archive-preview.png)
