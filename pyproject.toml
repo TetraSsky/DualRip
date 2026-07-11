@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dualrip"
-version = "2.0.0"
+dynamic = ["version"]
 description = "Nintendo DS SDAT sound-effect (SSAR) ripper - raw WAV export with loop points"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -27,3 +27,6 @@ dualrip-gui = "dualrip.gui.app:main"
 
 [tool.setuptools.packages.find]
 include = ["dualrip*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "dualrip._version.__version__"}

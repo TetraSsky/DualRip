@@ -2,7 +2,7 @@
 DualRip -- Nintendo DS SDAT sound-effect (SSAR & SSEQ) ripper.
 """
 
-__version__ = '2.1.1'
+from ._version import __version__
 
 from .bankmap import BankResolver, parse_bank_map
 from .export import (
