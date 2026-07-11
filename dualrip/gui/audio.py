@@ -7,6 +7,9 @@ Two feed modes:
   live_begin/push/end — ring-buffer for live seekable preview.
 
 Single persistent PortAudio OutputStream (sd.play crashes rapid previews on Windows). Callback never touches Qt. sounddevice is optional.
+
+recheck_device() hot-swaps the stream onto the default output device.
+Wired from the GUI to QMediaDevices.audioOutputsChanged.
 """
 
 import threading
@@ -30,6 +33,9 @@ class _Player:
         self._lock = threading.Lock()
         self._stream = None
         self._stream_rate = None
+        self._stream_device = None # output device index
+        self._stream_lock = threading.Lock() # guards _stream/_stream_rate/_stream_device
+        self._last_qt_id = None # last QAudioDevice.id() acted on; de-dupes repeat/bursty OS notifications for the same default device
         self._data = None # int16 stereo ndarray (capacity, not length)
         self._rate = 0
         self._pos = 0 # playhead, in frames
@@ -59,6 +65,39 @@ class _Player:
         self._seek_target = None  # pending seek (content frame) for the producer
         self._cond = threading.Condition(self._lock)  # wakes producer on space/seek
         self._volume = 1.0  # output gain, 0.0–1.0
+
+    def recheck_device(self, qt_id=None):
+        """
+        Call when the OS default output device changes
+        GUI passes Qt device id as qt_id (= bytes(QMediaDevices.defaultAudioOutput().id())).
+
+        - PortAudio caches the default device internally
+        - terminate/initialize cycle clears it but kills the active stream
+        - audioOutputsChanged can fire repeatedly for the same device, qt_id deduplicates to avoid unnecessary teardown
+
+        Playback state lives outside the stream, so _ensure_stream picks the new device seamlessly on reopen
+        """
+        if _sd is None:
+            return
+        with self._stream_lock:
+            if qt_id is not None and qt_id == self._last_qt_id:
+                return
+            self._last_qt_id = qt_id
+            rate = self._stream_rate
+        if rate is None:
+            return
+
+        def run():
+            with self._stream_lock:
+                try:
+                    _sd._terminate()
+                    _sd._initialize()
+                except Exception:
+                    pass
+                self._stream = None
+            self._ensure_stream(rate)
+
+        threading.Thread(target=run, daemon=True).start()
 
     def _callback(self, outdata, frames, _time, status):
         try:
@@ -282,25 +321,37 @@ class _Player:
             return self._live
 
     def _ensure_stream(self, rate):
-        if self._stream is not None and self._stream_rate == rate:
-            return True
-        old, self._stream = self._stream, None
-        if old is not None:
-            try:
-                old.stop()
-                old.close()
-            except Exception:
-                pass
+        """(Re)open the output stream if the sample rate or the resolved
+        output device changed since it was last opened; otherwise reuse it.
+        Called both on every new preview and by recheck_device()'s background
+        thread, so it must be safe against concurrent callers -- _stream_lock
+        is separate from _lock (which guards playback state/position) so a
+        device (re)open here can never stall the realtime audio callback."""
         try:
-            stream = _sd.OutputStream(
-                samplerate=rate, channels=2, dtype='int16',
-                blocksize=BLOCKSIZE, callback=self._callback)
-            stream.start()
+            device = _sd.query_devices(kind='output')['index']
         except Exception:
-            return False
-        self._stream = stream
-        self._stream_rate = rate
-        return True
+            device = None
+        with self._stream_lock:
+            if self._stream is not None and self._stream_rate == rate and self._stream_device == device:
+                return True
+            old, self._stream = self._stream, None
+            if old is not None:
+                try:
+                    old.stop()
+                    old.close()
+                except Exception:
+                    pass
+            try:
+                stream = _sd.OutputStream(
+                    device=device, samplerate=rate, channels=2, dtype='int16',
+                    blocksize=BLOCKSIZE, callback=self._callback)
+                stream.start()
+            except Exception:
+                return False
+            self._stream = stream
+            self._stream_rate = rate
+            self._stream_device = device
+            return True
 
     def load(self, audio, rate, loop_start=None, loop_end=None):
         """Load a complete sound (int16 stereo ndarray) without starting playback. loop_start/loop_end are frame indices of the sound's own loop region; looping falls back to the whole buffer when absent."""
@@ -528,7 +579,8 @@ class _Player:
 
     def shutdown(self):
         self.unload()
-        old, self._stream = self._stream, None
+        with self._stream_lock:
+            old, self._stream = self._stream, None
         if old is not None:
             try:
                 old.stop()
@@ -540,6 +592,11 @@ _player = _Player()
 
 def available():
     return _sd is not None
+
+def recheck_device(qt_id=None):
+    """Call when the OS default output device changes (wired from the GUI
+    layer to Qt's QMediaDevices.audioOutputsChanged). No-op without audio."""
+    _player.recheck_device(qt_id)
 
 def load(audio, rate, loop_start=None, loop_end=None):
     """Load a complete int16 stereo ndarray into the player. Returns success."""
