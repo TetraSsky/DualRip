@@ -5,8 +5,7 @@ Uses ndspy.rom.NintendoDSRom to open the ROM and scans for files whose magic
 bytes are b'SDAT'.  Returns raw bytes so the SDAT layer (SdatFile.from_bytes)
 can parse them without touching the disk.
 
-Multi-SDAT games (e.g. Sonic Colors has 12) are handled upstream — this
-module simply reports what is available.
+Games with multiple SDATs are handled upstream this module simply reports what is available.
 """
 
 from __future__ import annotations

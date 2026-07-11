@@ -50,8 +50,7 @@ dualrip --sdat game.nds --sdat-index 0 --archive all --out MyRip
 GUI: open a `.sdat` or `.nds`, browse/filter, double-click to preview any
 sound effect or music track (seek, pause, loop on its own loop points),
 Ctrl/Shift-select sound effects, archives or sequences and export.
-ROMs with multiple SDATs (e.g. Sonic Colors has 12) let you pick several
-at once via the selection dialog; they appear as top-level groups in the tree.
+ROMs with multiple SDATs let you pick several at once via the selection
 
 ## Dynamic bank slots
 

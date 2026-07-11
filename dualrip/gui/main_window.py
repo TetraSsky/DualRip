@@ -191,7 +191,7 @@ class MainWindow(QMainWindow):
         rv.addStretch(1)
 
         note = QLabel(
-            'Raw export: one loop iteration, native silences, full '
+            'Raw export: steady-state loop (2 passes), native silences, full '
             'releases.\nLoop points go to manifest.csv and into a '
             'smpl chunk in the WAV.\nCtrl/Shift-click to select several '
             'sound effects, archives or music sequences.'
