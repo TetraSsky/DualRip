@@ -14,7 +14,7 @@ a = Analysis(
         # heavy Qt modules the app does not use
         'PySide6.QtWebEngineCore', 'PySide6.QtWebEngineWidgets',
         'PySide6.QtQml', 'PySide6.QtQuick', 'PySide6.QtQuick3D',
-        'PySide6.QtPdf', 'PySide6.QtCharts', 'PySide6.QtMultimedia',
+        'PySide6.QtPdf', 'PySide6.QtCharts',
         'PySide6.QtDesigner', 'PySide6.QtTest',
         'tkinter', 'matplotlib', 'scipy', 'PIL',
     ],
