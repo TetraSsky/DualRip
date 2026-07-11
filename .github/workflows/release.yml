@@ -50,8 +50,8 @@ jobs:
 
             - Rips every SSAR entry & SSEQ music sequence to WAV (CLI + GUI).
             - Accepts `.sdat` files or `.nds` ROMs directly — SDATs are extracted automatically.
-            - For ROMs with multiple SDATs (e.g. Sonic Colors), pick several at once in the import dialog.
-            - Raw export: one loop iteration per sound, native rests kept, full release envelopes; loop points in manifest.csv and embedded in the WAV as a smpl chunk.
+            - For ROMs with multiple SDATs, pick several at once in the import dialog.
+            - Raw export: steady-state loop (2 passes) for looping sequences, native rests kept, full release envelopes; loop points in manifest.csv and embedded in the WAV as a smpl chunk.
             - NULL/dynamic bank slots resolved automatically per entry (--bank-map to override).
             - GUI: SDAT browser with filter and per-SDAT grouping, preview player (seek / pause / loop on the sound's own loop points), multi-select batch export with a live log.
 
