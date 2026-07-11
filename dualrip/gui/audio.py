@@ -35,7 +35,7 @@ class _Player:
         self._stream_rate = None
         self._stream_device = None # output device index
         self._stream_lock = threading.Lock() # guards _stream/_stream_rate/_stream_device
-        self._last_qt_id = None # last QAudioDevice.id() acted on; de-dupes repeat/bursty OS notifications for the same default device
+        self._last_qt_id = None # last QAudioDevice.id() acted on
         self._data = None # int16 stereo ndarray (capacity, not length)
         self._rate = 0
         self._pos = 0 # playhead, in frames
