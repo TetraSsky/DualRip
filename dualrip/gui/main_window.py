@@ -286,6 +286,7 @@ class MainWindow(QMainWindow):
         self._resolvers.clear()
         self._cache.clear()
         self.player.clear()
+        self.filter_edit.clear()
 
     def _pick_sdats_from_rom(self, rom_path, sdats):
         """Show a dialog listing all SDATs — allow multi-selection (Ctrl/Shift-click)."""
@@ -458,6 +459,7 @@ class MainWindow(QMainWindow):
 
     def _apply_filter(self, text):
         text = text.strip().lower()
+        matches = []
 
         def filter_children(item):
             visible = 0
@@ -466,10 +468,14 @@ class MainWindow(QMainWindow):
                 if child.childCount():
                     sub = filter_children(child)
                     child.setHidden(bool(text) and sub == 0)
+                    if text and sub:
+                        child.setExpanded(True)
                     visible += sub
                 else:
                     match = not text or text in child.text(0).lower()
                     child.setHidden(not match)
+                    if text and match:
+                        matches.append(child)
                     visible += match
             return visible
 
@@ -479,6 +485,13 @@ class MainWindow(QMainWindow):
             top.setHidden(bool(text) and vis == 0)
             if text and vis:
                 top.setExpanded(True)
+
+        if text:
+            self.tree.clearSelection()
+            for it in matches:
+                it.setSelected(True)
+            if matches:
+                self.tree.scrollToItem(matches[0])
 
     # -- selection & details helpers -----------------------------------------
 
