@@ -36,7 +36,7 @@ def _progress(done, total, res):
         print(f'[{res.index:3d}] {res.name}: {res.duration:.2f}s {res.status}')
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(prog='dualrip', description='Rip Nintendo DS SDAT (SSAR + SSEQ) to WAV — raw export, one loop iteration, loop points in manifest + smpl chunk.',)
+    ap = argparse.ArgumentParser(prog='dualrip', description='Rip Nintendo DS SDAT (SSAR + SSEQ) to WAV — raw export, steady-state loop (2 passes), loop points in manifest + smpl chunk.',)
     ap.add_argument('--sdat', required=True, help='path to sound_data.sdat, or a .nds ROM (use --sdat-index to pick the SDAT when multiple exist)',)
     ap.add_argument('--sdat-index', type=int, default=None, metavar='N', help='index of the SDAT inside a .nds ROM (0=first). If omitted and the ROM has multiple SDATs, they are listed and the program exits.',)
     ap.add_argument('--archive', default=None, help='SSAR index, or "all" (sound effects). Default "all" when --sequence is not given',)

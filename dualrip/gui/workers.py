@@ -70,17 +70,14 @@ class StreamWorker(_ThreadWorker):
             time.sleep(PACE_SLEEP)
 
     def _start_racer(self, token, blob, offset, bank, waveArc, entry_volume, player_prio):
-        """State-only LiveRenderer fast-forward → exact total before the streaming render produces much audio (~50-500× faster, no numpy synthesis)."""
+        """State-only LiveRenderer fast-forward > exact total before the streaming render produces much audio (~50-500× faster, no numpy synthesis)."""
 
         def run():
-            try:
-                r = LiveRenderer(blob, offset, bank, waveArc, entry_volume, self._rate, player_prio=player_prio, loop_passes=2)
-                while not r.finished and not self._cancel.is_set():
-                    r.step(produce=False)
-                if not self._cancel.is_set():
-                    audio.set_estimated_total(token, r.emitted)
-            except Exception:
-                pass
+            r = LiveRenderer(blob, offset, bank, waveArc, entry_volume, self._rate, player_prio=player_prio, loop_passes=2)
+            while not r.finished and not self._cancel.is_set():
+                r.step(produce=False)
+            if not self._cancel.is_set():
+                audio.set_estimated_total(token, r.emitted)
 
         threading.Thread(target=run, daemon=True).start()
 
