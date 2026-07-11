@@ -32,11 +32,15 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from .. import __version__
+try:
+    from PySide6.QtMultimedia import QMediaDevices
+except ImportError:
+    QMediaDevices = None
+from .... import __version__
 from ..bankmap import BankResolver, parse_bank_map
 from ..formats.rom import find_sdats_in_rom
 from ..formats.sdat import SdatFile
-from . import audio
+from ....save import audio
 from .dialogs import ExportDialog, SettingsDialog, load_settings
 from .player import PlayerBar
 from .workers import LiveWorker, StreamWorker
@@ -79,6 +83,15 @@ class MainWindow(QMainWindow):
         self._build_menu()
         self._build_ui()
         self._set_loaded(False)
+
+        self._media_devices = None
+        if QMediaDevices is not None:
+            self._media_devices = QMediaDevices(self)
+            self._media_devices.audioOutputsChanged.connect(self._on_audio_outputs_changed)
+
+    def _on_audio_outputs_changed(self):
+        dev = self._media_devices.defaultAudioOutput()
+        audio.recheck_device(None if dev.isNull() else bytes(dev.id()))
 
     # -- backward-compat accessors for single-SDAT code paths --
     @property
