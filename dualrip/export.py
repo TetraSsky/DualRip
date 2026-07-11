@@ -72,7 +72,11 @@ class RenderResult:
         self.error = error
 
 def render_one(sdat, seqarc, entry, rate=44100, resolver=None):
-    """Render one entry in memory (no I/O)."""
+    """
+    Render one entry in memory (no I/O).
+
+    Looping entries are rendered with two loop passes: the second pass is the hardware steady state
+    """
     if entry.offset is None:
         return RenderResult(entry.index, entry.name, 'null')
     if resolver is None:
@@ -81,9 +85,7 @@ def render_one(sdat, seqarc, entry, rate=44100, resolver=None):
         rbid = resolver.resolve(entry)
         label = str(entry.bank_id) if rbid == entry.bank_id else f'{entry.bank_id}->{rbid}'
         bank, wave_arc = sdat.bank(rbid)
-        audio, looped, marks = render_entry(
-            seqarc.blob, entry.offset, bank, wave_arc, entry.volume, rate, player_prio=entry.cpr or 0
-        )
+        audio, looped, marks = render_entry(seqarc.blob, entry.offset, bank, wave_arc, entry.volume, rate, player_prio=entry.cpr or 0, loop_passes=2)
         peak = int(np.abs(audio.astype(np.int32)).max()) if len(audio) else 0
         if len(audio) == 0 or peak == 0:
             return RenderResult(entry.index, entry.name, 'empty', label)

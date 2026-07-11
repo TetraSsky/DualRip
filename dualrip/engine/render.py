@@ -26,14 +26,14 @@ class LiveRenderer:
     Owns a Player + clock/emit bookkeeping. step(produce=True) > int16 block, step(produce=False) > silent fast-forward (bit-exact state advance).
     snapshot()/from_snapshot() enable checkpoint+ffwd seek in live preview.
 
-    Raw policy: one loop iteration, full release envelopes, native rests, PSG/noise endless notes released hold_seconds after idle, ~15ms cold-start warm-up skipped. player_prio = cpr from SDAT INFO.
+    Raw policy: loop_passes loop iterations, full release envelopes, native rests, PSG/noise endless notes released hold_seconds after idle, ~15ms cold-start warm-up skipped. player_prio = cpr from SDAT INFO.
     """
 
-    def __init__(self, blob, start_offset, bank, waveArc, entry_volume, rate, hold_seconds=2.0, player_prio=0):
+    def __init__(self, blob, start_offset, bank, waveArc, entry_volume, rate, hold_seconds=2.0, player_prio=0, loop_passes=1):
         self.rate = rate
         self.hold_seconds = hold_seconds
         self.sps = 1.0 / rate
-        self.ply = Player(blob, bank, waveArc, rate, cnv_scale(entry_volume), player_prio)
+        self.ply = Player(blob, bank, waveArc, rate, cnv_scale(entry_volume), player_prio, loop_passes)
         self.ply.setup(start_offset)
         self.ply.timer()
         self.seconds_into = 0.0
@@ -91,7 +91,11 @@ class LiveRenderer:
     @property
     def loop_marks(self):
         ply = self.ply
-        if ply.loop_start_sample is not None and ply.loop_end_sample > ply.loop_start_sample:
+        if ply.loop_start_sample is None:
+            return None
+        if ply.loop_end2_sample is not None and ply.loop_end2_sample > ply.loop_end_sample:
+            return ply.loop_end_sample, ply.loop_end2_sample
+        if ply.loop_end_sample > ply.loop_start_sample:
             return ply.loop_start_sample, ply.loop_end_sample
         return None
 
@@ -195,6 +199,7 @@ def render_entry_stream(
     hold_seconds=2.0,
     player_prio=0,
     chunk_samples=STREAM_CHUNK_SAMPLES,
+    loop_passes=1,
 ):
     """
     Render one SSAR/SSEQ entry incrementally.
@@ -202,7 +207,7 @@ def render_entry_stream(
     Yields ('data', int16 stereo ndarray) chunks (~STREAM_CHUNK_SAMPLES), then ('end', looped: bool, loop_marks or None). Regroups
     LiveRenderer.step() — concatenated whole is bit-identical to a one-shot render.
     """
-    r = LiveRenderer(blob, start_offset, bank, waveArc, entry_volume, rate, hold_seconds, player_prio)
+    r = LiveRenderer(blob, start_offset, bank, waveArc, entry_volume, rate, hold_seconds, player_prio, loop_passes)
     pend = []
     pend_n = 0
     while not r.finished:
@@ -261,7 +266,7 @@ def estimate_end_sample(blob, start_offset, rate, player_prio=0, should_abort=No
         if should_abort is not None and clocks % abort_every == 0 and should_abort():
             return None
 
-def render_entry(blob, start_offset, bank, waveArc, entry_volume, rate, hold_seconds=2.0, player_prio=0):
+def render_entry(blob, start_offset, bank, waveArc, entry_volume, rate, hold_seconds=2.0, player_prio=0, loop_passes=1):
     """
     Render one SSAR/SSEQ entry → single stereo int16 buffer.
 
@@ -272,9 +277,7 @@ def render_entry(blob, start_offset, bank, waveArc, entry_volume, rate, hold_sec
     chunks = []
     looped = False
     marks = None
-    for item in render_entry_stream(
-        blob, start_offset, bank, waveArc, entry_volume, rate, hold_seconds, player_prio
-    ):
+    for item in render_entry_stream(blob, start_offset, bank, waveArc, entry_volume, rate, hold_seconds, player_prio, loop_passes=loop_passes):
         if item[0] == 'data':
             chunks.append(item[1])
         else:
