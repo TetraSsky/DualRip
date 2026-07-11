@@ -74,7 +74,7 @@ class StreamWorker(_ThreadWorker):
 
         def run():
             try:
-                r = LiveRenderer(blob, offset, bank, waveArc, entry_volume, self._rate, player_prio=player_prio)
+                r = LiveRenderer(blob, offset, bank, waveArc, entry_volume, self._rate, player_prio=player_prio, loop_passes=2)
                 while not r.finished and not self._cancel.is_set():
                     r.step(produce=False)
                 if not self._cancel.is_set():
@@ -106,7 +106,7 @@ class StreamWorker(_ThreadWorker):
         try:
             for item in render_entry_stream(
                 self._seqarc.blob, entry.offset, bank, wave_arc, entry.volume,
-                self._rate, player_prio=entry.cpr or 0,
+                self._rate, player_prio=entry.cpr or 0, loop_passes=2,
             ):
                 if self._cancel.is_set():
                     return
@@ -195,7 +195,7 @@ class LiveWorker(_ThreadWorker):
         self._cancel.set()
 
     def _new_renderer(self):
-        return LiveRenderer(*self._args, player_prio=self._prio)
+        return LiveRenderer(*self._args, player_prio=self._prio, loop_passes=2)
 
     def _reseed(self, target):
         """Return a renderer positioned exactly at `target` content frames: the nearest checkpoint restored and silently fast-forwarded (or from 0 if the racer has not reached that region yet)."""

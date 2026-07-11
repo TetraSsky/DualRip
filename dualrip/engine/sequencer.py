@@ -135,6 +135,7 @@ class Track:
         'updateFlags',
         'waitChn',
         'visited',
+        'passes_left',
     )
 
     def __init__(self):
@@ -168,6 +169,7 @@ class Track:
         self.updateFlags = [False] * 5
         self.waitChn = False
         self.visited = {}
+        self.passes_left = 0
 
     def init(self, handle, player, pos, n):
         self.trackId = handle
@@ -200,6 +202,7 @@ class Track:
         self.modDepth = 0
         self.waitChn = False
         self.visited = {}
+        self.passes_left = self.ply.loop_passes - 1
 
     # override helpers
     def oval_read8(self, extra=False):
@@ -437,15 +440,19 @@ class Track:
             elif cmd == 0x94: # Goto
                 dest = self.read24()
                 if dest in self.visited:
-                    # jumping into already-executed code = sequence loop:
-                    # stop after exactly one iteration. (A backward Goto into
-                    # NOT-yet-executed code is a shared-code jump, e.g. the
-                    # red-coin sounds, and must be followed.)
+                    # jumping into already-executed code = sequence loop
                     self.ply.loop_detected = True
-                    self.ply.mark_loop(self.visited[dest], self.ply.now_sample)
-                    self.state[TS_END] = True
-                    return
-                self.pos = dest
+                    self.ply.mark_loop(self.visited[dest], self.ply.now_sample, self)
+                    if self.passes_left > 0:
+                        # follow the jump like the driver: same tick, no gap
+                        self.passes_left -= 1
+                        self.visited = {}
+                        self.pos = dest
+                    else:
+                        self.state[TS_END] = True
+                        return
+                else:
+                    self.pos = dest
             elif cmd == 0x95: # Call
                 dest = self.read24()
                 if self.stackPos < 3:
@@ -492,10 +499,17 @@ class Track:
                     rPos = self.stack[self.stackPos - 1][1]
                     prevR = self.loopCount[self.stackPos - 1]
                     if not prevR:
-                        # infinite loop: play one iteration and fall through
+                        # infinite loop: play loop_passes iterations, then fall through
                         self.ply.loop_detected = True
-                        self.ply.mark_loop(self.stack[self.stackPos - 1][2], self.ply.now_sample)
-                        self.stackPos -= 1
+                        self.ply.mark_loop(self.stack[self.stackPos - 1][2], self.ply.now_sample, self)
+                        if self.passes_left > 0:
+                            self.passes_left -= 1
+                            # restamp the entry sample so the repeat pass
+                            # reports (this wrap, next wrap) on re-detection
+                            self.stack[self.stackPos - 1] = ('loop', rPos, self.ply.now_sample)
+                            self.pos = rPos
+                        else:
+                            self.stackPos -= 1
                     else:
                         if prevR:
                             self.loopCount[self.stackPos - 1] = prevR - 1
@@ -635,15 +649,21 @@ class Player:
         sample_rate: output sample rate in Hz.
         sseq_vol: SSEQ master volume (0-127).
         player_prio: channel-allocation priority base from SDAT cpr field.
+        loop_passes: number of times the sequence loop body is played.
+            1 = current/legacy behavior (one iteration, marks on pass 1)
+            2 = steady-state export: tracks follow their backward jump once
     """
-    def __init__(self, blob, bank, waveArc, sample_rate, sseq_vol, player_prio=0):
+    def __init__(self, blob, bank, waveArc, sample_rate, sseq_vol, player_prio=0, loop_passes=1):
         self.blob = blob
         self.bank = bank
         self.waveArc = waveArc
         self.sampleRate = sample_rate
+        self.loop_passes = loop_passes
         self.loop_detected = False
         self.loop_start_sample = None
         self.loop_end_sample = None
+        self.loop_end2_sample = None
+        self._loop_owner = None
         self.ticked = False
         self.now_sample = 0
         self.prio = player_prio
@@ -691,10 +711,18 @@ class Player:
         self.channels[cur].vol = 0x7FF
         return cur
 
-    def mark_loop(self, start_sample, end_sample):
+    def mark_loop(self, start_sample, end_sample, track=None):
         if self.loop_start_sample is None:
             self.loop_start_sample = start_sample
             self.loop_end_sample = end_sample
+            self._loop_owner = track
+        elif (
+            track is not None
+            and track is self._loop_owner
+            and self.loop_end2_sample is None
+            and end_sample > self.loop_end_sample
+        ):
+            self.loop_end2_sample = end_sample
 
     def run(self):
         while self.tempoCount >= 240:
