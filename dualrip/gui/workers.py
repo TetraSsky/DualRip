@@ -375,6 +375,9 @@ class BatchWorker(_ThreadWorker):
         return len(self._sdat(sk).seqarc(ident).entries)
 
     def _run(self):
+        resume_after = audio.state() == audio.PLAYING
+        if resume_after:
+            audio.pause()
         try:
             summaries = []
             grand_total = sum(self._job_size(j[0], j[1], j[2], j[3]) for j in self._jobs)
@@ -414,3 +417,6 @@ class BatchWorker(_ThreadWorker):
             self._emit(self.batch_done, summaries)
         except Exception as exc:
             self._emit(self.failed, str(exc))
+        finally:
+            if resume_after and audio.state() == audio.PAUSED:
+                audio.play()
