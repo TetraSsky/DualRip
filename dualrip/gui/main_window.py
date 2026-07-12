@@ -467,6 +467,18 @@ class MainWindow(QMainWindow):
         self.player.clear()
         self._item_index = {}
         self.filter_edit.clear()
+        for lbl in (
+            self.lbl_name,
+            self.lbl_kind,
+            self.lbl_where,
+            self.lbl_bank,
+            self.lbl_volume,
+            self.lbl_duration,
+            self.lbl_loop,
+            self.lbl_status,
+        ):
+            lbl.setText('-')
+        self.player.setVisible(False)
 
     def _pick_sdats_from_rom(self, rom_path, sdats):
         """Show a dialog listing all SDATs — allow multi-selection (Ctrl/Shift-click)."""
@@ -675,6 +687,10 @@ class MainWindow(QMainWindow):
                 it.setSelected(True)
             if matches:
                 self.tree.scrollToItem(matches[0])
+            n = len(matches)
+            self.statusBar().showMessage(f'{n} match' + ('' if n == 1 else 'es'))
+        else:
+            self._update_status_and_title()
 
     # -- selection & details helpers -----------------------------------------
 
