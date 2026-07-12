@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSplitter,
+    QStackedWidget,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -137,6 +138,12 @@ class MainWindow(QMainWindow):
         act_quit.triggered.connect(self.close)
         m_file.addAction(act_quit)
 
+        m_view = self.menuBar().addMenu('&View')
+        self.act_toggle_panel = QAction('&Toggle Panel', self)
+        self.act_toggle_panel.setShortcut('Ctrl+D')
+        self.act_toggle_panel.triggered.connect(self._toggle_right_panel)
+        m_view.addAction(self.act_toggle_panel)
+
         m_help = self.menuBar().addMenu('&Help')
         act_about = QAction('&About DualRip', self)
         act_about.triggered.connect(self.show_about)
@@ -144,6 +151,8 @@ class MainWindow(QMainWindow):
 
     def _build_ui(self):
         splitter = QSplitter(self)
+        self.splitter = splitter
+        self._last_right_size = SPLITTER_RIGHT
 
         # left: filter + tree
         left = QWidget(splitter)
@@ -159,10 +168,20 @@ class MainWindow(QMainWindow):
         self.tree.setColumnWidth(0, TREE_COL_NAME)
         self.tree.setColumnWidth(1, TREE_COL_ID)
         self.tree.setUniformRowHeights(True)
+        self.tree.setAnimated(True)
         self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.tree.currentItemChanged.connect(self._selection_changed)
         self.tree.itemActivated.connect(lambda *_: self.play_selected())
-        lv.addWidget(self.tree)
+
+        self.empty_placeholder = QLabel('Open a sound_data.sdat or .nds ROM to get started\n''(File > Open SDAT/NDS..., or Ctrl+O)')
+        self.empty_placeholder.setAlignment(Qt.AlignCenter)
+        self.empty_placeholder.setWordWrap(True)
+        self.empty_placeholder.setStyleSheet('color: gray;')
+
+        self.tree_stack = QStackedWidget(left)
+        self.tree_stack.addWidget(self.tree)
+        self.tree_stack.addWidget(self.empty_placeholder)
+        lv.addWidget(self.tree_stack)
 
         # right: details + actions
         right = QWidget(splitter)
@@ -244,6 +263,17 @@ class MainWindow(QMainWindow):
             self.filter_edit,
         ):
             w.setEnabled(loaded)
+        self.tree_stack.setCurrentWidget(self.tree if loaded else self.empty_placeholder)
+
+    def _toggle_right_panel(self):
+        sizes = self.splitter.sizes()
+        if sizes[1] > 0:
+            self._last_right_size = sizes[1]
+            self.splitter.setSizes([sizes[0] + sizes[1], 0])
+        else:
+            total = sum(sizes)
+            right = self._last_right_size or SPLITTER_RIGHT
+            self.splitter.setSizes([max(total - right, 100), right])
 
     def open_sdat(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -768,6 +798,7 @@ class MainWindow(QMainWindow):
     def _preview_done(self, key, res):
         if key != self._preview_key:
             return
+        self.statusBar().clearMessage()
         self._finish_preview_worker()
         self._preview_key = None
         self._cache[key] = res
@@ -787,6 +818,7 @@ class MainWindow(QMainWindow):
     def _preview_failed(self, key, msg):
         if key != self._preview_key:
             return
+        self.statusBar().clearMessage()
         self._finish_preview_worker()
         self._preview_key = None
         self.statusBar().showMessage(f'Render failed: {msg}')
