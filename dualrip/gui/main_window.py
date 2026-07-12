@@ -8,7 +8,7 @@ can browse and export across all of them without re-opening the file.
 
 import os
 from collections import OrderedDict
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, QPoint, Qt
 from PySide6.QtGui import QAction, QIcon, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QSplitter,
     QStackedWidget,
@@ -59,6 +60,7 @@ SPLITTER_LEFT = 580
 SPLITTER_RIGHT = 440
 TREE_COL_NAME = 330
 TREE_COL_ID = 46
+STATUSBAR_MSG_LEFT = 6
 
 # ROLE_KIND: 'sdat' | 'cat' | 'seqcat' | 'arc' | 'entry' | 'seq' | 'bank' | 'war'
 ROLE_KIND = Qt.UserRole
@@ -156,6 +158,8 @@ class MainWindow(QMainWindow):
 
         # left: filter + tree
         left = QWidget(splitter)
+        self._left_panel = left
+        left.installEventFilter(self)
         lv = QVBoxLayout(left)
         lv.setContentsMargins(6, 6, 3, 6)
         self.filter_edit = QLineEdit(left)
@@ -251,6 +255,19 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(0, 1)
         splitter.setSizes([SPLITTER_LEFT, SPLITTER_RIGHT])
         self.setCentralWidget(splitter)
+
+        self._render_status = QWidget(self)
+        row = QHBoxLayout(self._render_status)
+        row.setContentsMargins(0, 0, 0, 0)
+        self._render_status_label = QLabel(self._render_status)
+        self._render_status_bar = QProgressBar(self._render_status)
+        self._render_status_bar.setRange(0, 0)
+        self._render_status_bar.setTextVisible(False)
+        row.addWidget(self._render_status_label)
+        row.addWidget(self._render_status_bar, 1)
+        self.statusBar().setStyleSheet('QStatusBar::item { border: none; }')
+        self.statusBar().addWidget(self._render_status, 1)
+        self._render_status.hide()
 
     def _set_loaded(self, loaded):
         for w in (
@@ -685,6 +702,31 @@ class MainWindow(QMainWindow):
 
     # -- playback ------------------------------------------------------------
 
+    def _show_render_progress(self, name):
+        self.statusBar().clearMessage()
+        self._render_status_label.setText(f'Rendering {name}')
+        self._render_status.show()
+        self._update_render_progress_width()
+
+    def _update_render_progress_width(self):
+        """Keep the render indicator aligned and sized."""
+        if not self._render_status.isVisible():
+            return
+        self.statusBar().layout().activate()
+        item_x = self._render_status.mapTo(self.statusBar(), QPoint(0, 0)).x()
+        self._render_status.layout().setContentsMargins(max(STATUSBAR_MSG_LEFT - item_x, 0), 0, 0, 0)
+        panel_right = self.splitter.mapTo(self, QPoint(self.splitter.sizes()[0], 0)).x()
+        offset = self._render_status.mapTo(self, QPoint(0, 0)).x()
+        self._render_status.setMaximumWidth(max(panel_right - offset, 0))
+
+    def _hide_render_progress(self):
+        self._render_status.hide()
+
+    def eventFilter(self, obj, event):
+        if obj is getattr(self, '_left_panel', None) and event.type() == QEvent.Resize:
+            self._update_render_progress_width()
+        return super().eventFilter(obj, event)
+
     def _on_play_clicked(self):
         sdat, sk, seqarc, entry = self._current_playable()
         if entry is None or sdat is None:
@@ -732,7 +774,7 @@ class MainWindow(QMainWindow):
             return
         self._cancel_preview()
         audio.unload()
-        self.statusBar().showMessage(f'Rendering {entry.name}...')
+        self._show_render_progress(entry.name)
         worker = StreamWorker(key, sdat, seqarc, entry, self.settings['rate'], self._resolver(sdat, sk, seqarc))
         worker.done.connect(self._preview_done)
         worker.failed.connect(self._preview_failed)
@@ -745,7 +787,7 @@ class MainWindow(QMainWindow):
         """Start seamless live music preview (LiveWorker)."""
         self._cancel_preview()
         audio.unload()
-        self.statusBar().showMessage(f'Rendering {entry.name}...')
+        self._show_render_progress(entry.name)
         worker = LiveWorker(key, sdat, seqarc, entry, self.settings['rate'], self._resolver(sdat, sk, seqarc))
         worker.meta.connect(self._music_meta)
         worker.failed.connect(self._preview_failed)
@@ -758,6 +800,7 @@ class MainWindow(QMainWindow):
         """LiveWorker reported exact length/loops."""
         if key != self._preview_key:
             return
+        self._hide_render_progress()
         self._cache[key] = res
         self._cache.move_to_end(key)
         self._evict_cache()
@@ -770,6 +813,7 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage(f'{res.name}: {res.status}' + (f'({res.error})' if res.error else ''))
 
     def _cancel_preview(self):
+        self._hide_render_progress()
         worker, self._preview_worker = self._preview_worker, None
         self._preview_key = None
         if worker is not None:
@@ -798,7 +842,7 @@ class MainWindow(QMainWindow):
     def _preview_done(self, key, res):
         if key != self._preview_key:
             return
-        self.statusBar().clearMessage()
+        self._hide_render_progress()
         self._finish_preview_worker()
         self._preview_key = None
         self._cache[key] = res
@@ -818,7 +862,7 @@ class MainWindow(QMainWindow):
     def _preview_failed(self, key, msg):
         if key != self._preview_key:
             return
-        self.statusBar().clearMessage()
+        self._hide_render_progress()
         self._finish_preview_worker()
         self._preview_key = None
         self.statusBar().showMessage(f'Render failed: {msg}')
