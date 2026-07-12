@@ -2,8 +2,8 @@
 DualRip dialogs: Settings and the Export confirmation/log window.
 """
 
+import json
 import os
-
 from PySide6.QtCore import QSettings
 from PySide6.QtGui import QFontDatabase
 from PySide6.QtWidgets import (
@@ -45,6 +45,19 @@ def save_settings(values):
     s = QSettings('DualRip', 'DualRip')
     for k, v in values.items():
         s.setValue(k, v)
+
+def load_recent_files():
+    """[{'path': str, 'sdats': [int, ...] or None}], most recent first."""
+    s = QSettings('DualRip', 'DualRip')
+    try:
+        entries = json.loads(s.value('recent_files', '[]') or '[]')
+        return [e for e in entries if isinstance(e, dict) and e.get('path')]
+    except (TypeError, ValueError):
+        return []
+
+def save_recent_files(entries):
+    s = QSettings('DualRip', 'DualRip')
+    s.setValue('recent_files', json.dumps(entries))
 
 class SettingsDialog(QDialog):
     """Output folder, sample rate, bank-map override."""

@@ -8,8 +8,8 @@ can browse and export across all of them without re-opening the file.
 
 import os
 from collections import OrderedDict
-from PySide6.QtCore import QEvent, QPoint, Qt
-from PySide6.QtGui import QAction, QIcon, QKeySequence
+from PySide6.QtCore import QEvent, QPoint, Qt, QTimer
+from PySide6.QtGui import QAction, QIcon, QKeySequence, QPalette
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -47,7 +47,13 @@ from ..bankmap import BankResolver, parse_bank_map
 from ..formats.rom import find_sdats_in_rom
 from ..formats.sdat import SdatFile
 from . import audio
-from .dialogs import ExportDialog, SettingsDialog, load_settings
+from .dialogs import (
+    ExportDialog,
+    SettingsDialog,
+    load_recent_files,
+    load_settings,
+    save_recent_files,
+)
 from .player import PlayerBar
 from .workers import LiveWorker, StreamWorker
 
@@ -61,6 +67,7 @@ SPLITTER_RIGHT = 440
 TREE_COL_NAME = 330
 TREE_COL_ID = 46
 STATUSBAR_MSG_LEFT = 6
+RECENT_MAX = 8
 
 # ROLE_KIND: 'sdat' | 'cat' | 'seqcat' | 'arc' | 'entry' | 'seq' | 'bank' | 'war'
 ROLE_KIND = Qt.UserRole
@@ -76,6 +83,7 @@ class MainWindow(QMainWindow):
         if icon_path and os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
         self.resize(1060, 680)
+        self.setAcceptDrops(True)
 
         # _sdats: OrderedDict[sdat_key, (label, SdatFile)]
         self._sdats = OrderedDict()
@@ -120,6 +128,11 @@ class MainWindow(QMainWindow):
         act_open.setShortcut(QKeySequence.Open)
         act_open.triggered.connect(self.open_sdat)
         m_file.addAction(act_open)
+        self.menu_file = m_file
+        self.menu_recent = m_file.addMenu('Open &Recent')
+        self.menu_recent.aboutToShow.connect(self._populate_recent_menu)
+        # grey the submenu out when the list is empty, decided as File opens
+        m_file.aboutToShow.connect(self._update_recent_enabled)
         self.act_close_sdat = QAction('&Close file', self)
         self.act_close_sdat.setShortcut('Ctrl+W')
         self.act_close_sdat.triggered.connect(self._close_sdat)
@@ -180,7 +193,10 @@ class MainWindow(QMainWindow):
         self.tree.itemActivated.connect(lambda *_: self.play_selected())
         self.tree.installEventFilter(self)
 
-        self.empty_placeholder = QLabel('Open a sound_data.sdat or .nds ROM to get started\n''(File > Open SDAT/NDS..., or Ctrl+O)')
+        self.empty_placeholder = QLabel(
+            'Open a sound_data.sdat or .nds ROM to get started\n'
+            '(File > Open SDAT/NDS..., Ctrl+O or drag & drop a file)'
+        )
         self.empty_placeholder.setAlignment(Qt.AlignCenter)
         self.empty_placeholder.setWordWrap(True)
         self.empty_placeholder.setStyleSheet('color: gray;')
@@ -305,11 +321,15 @@ class MainWindow(QMainWindow):
         )
         if not path:
             return
+        self._open_path(path)
+
+    def _open_path(self, path, nds_preset=None):
+        """Open a .sdat or .nds by path, nds_preset preselects SDAT indices when reopening a multi-SDAT ROM from Recent (skips picker dialog)."""
         try:
             QApplication.setOverrideCursor(Qt.WaitCursor)
             self._cancel_preview()
             if path.lower().endswith('.nds'):
-                self._open_nds(path)
+                self._open_nds(path, preset=nds_preset)
             else:
                 self._open_sdat_file(path)
         except Exception as exc:
@@ -320,6 +340,85 @@ class MainWindow(QMainWindow):
         self._set_loaded(True)
         self._update_status_and_title()
 
+    # -- recent files -----------------------------------------------------------
+
+    def _remember_recent(self, path, sdat_indices):
+        path = os.path.abspath(path)
+        entries = [e for e in load_recent_files() if os.path.normcase(e['path']) != os.path.normcase(path)]
+        entries.insert(0, {'path': path, 'sdats': sdat_indices})
+        save_recent_files(entries[:RECENT_MAX])
+
+    @staticmethod
+    def _recent_label(path):
+        """Compact display path."""
+        home = os.path.expanduser('~')
+        if os.path.normcase(path).startswith(os.path.normcase(home)):
+            path = '~' + path[len(home):]
+        return path.replace('\\', '/')
+
+    def _update_recent_enabled(self):
+        self.menu_recent.setEnabled(bool(load_recent_files()))
+
+    def _populate_recent_menu(self):
+        self.menu_recent.clear()
+        entries = load_recent_files()
+        if not entries:
+            return
+        for e in entries:
+            act = self.menu_recent.addAction(self._recent_label(e['path']))
+            act.setToolTip(e['path'])
+            act.triggered.connect(lambda _=False, entry=e: self._open_recent(entry))
+        self.menu_recent.addSeparator()
+        self.menu_recent.addAction('Clear list', lambda: save_recent_files([]))
+
+    def _open_recent(self, entry):
+        if not os.path.exists(entry['path']):
+            QMessageBox.warning(self, 'DualRip', f'File not found:\n{entry["path"]}')
+            entries = [e for e in load_recent_files()
+                       if os.path.normcase(e['path']) != os.path.normcase(entry['path'])]
+            save_recent_files(entries)
+            return
+        self._open_path(entry['path'], nds_preset=entry.get('sdats'))
+
+    # -- drag & drop -----------------------------------------------------------
+
+    def _drag_path(self, event):
+        """Single local .sdat/.nds path from a drag, or None if not droppable."""
+        if self._sdats:
+            return None
+        urls = event.mimeData().urls()
+        if len(urls) != 1 or not urls[0].isLocalFile():
+            return None
+        path = urls[0].toLocalFile()
+        if path.lower().endswith(('.sdat', '.nds')):
+            return path
+        return None
+
+    def _set_drop_hint(self, active):
+        self.empty_placeholder.setAutoFillBackground(active)
+        if active:
+            pal = self.empty_placeholder.palette()
+            pal.setColor(QPalette.Window, self.palette().color(QPalette.Window).darker)
+            self.empty_placeholder.setPalette(pal)
+        else:
+            self.empty_placeholder.setPalette(self.palette())
+
+    def dragEnterEvent(self, event):
+        if self._drag_path(event) is not None:
+            event.acceptProposedAction()
+            self._set_drop_hint(True)
+
+    def dragLeaveEvent(self, event):
+        self._set_drop_hint(False)
+
+    def dropEvent(self, event):
+        self._set_drop_hint(False)
+        path = self._drag_path(event)
+        if path is None:
+            return
+        event.acceptProposedAction()
+        QTimer.singleShot(0, lambda: self._open_path(path))
+
     def _open_sdat_file(self, path):
         """Open a plain .sdat file — single SDAT, key='0'."""
         self._clear_all()
@@ -328,18 +427,27 @@ class MainWindow(QMainWindow):
         self._sdat_path = path
         self._generation += 1
         self._fill_tree()
+        self._remember_recent(path, None)
 
-    def _open_nds(self, path):
-        """Open a .nds ROM: extract SDAT(s), allow multi-select."""
+    def _open_nds(self, path, preset=None):
+        """
+        Open a .nds ROM: extract SDAT(s), allow multi-select.
+
+        preset: SDAT indices remembered by the Recent menu.
+        """
         sdats = find_sdats_in_rom(path)
-        if len(sdats) == 1:
-            chosen = [sdats[0]]
-        else:
-            QApplication.restoreOverrideCursor()
-            chosen = self._pick_sdats_from_rom(path, sdats)
-            QApplication.setOverrideCursor(Qt.WaitCursor)
-            if not chosen:
-                raise ValueError('No SDAT selected.')
+        chosen = None
+        if preset:
+            chosen = [s for s in sdats if s['index'] in set(preset)] or None
+        if chosen is None:
+            if len(sdats) == 1:
+                chosen = [sdats[0]]
+            else:
+                QApplication.restoreOverrideCursor()
+                chosen = self._pick_sdats_from_rom(path, sdats)
+                QApplication.setOverrideCursor(Qt.WaitCursor)
+                if not chosen:
+                    raise ValueError('No SDAT selected.')
         self._clear_all()
         rom_name = os.path.basename(path)
         for i, s in enumerate(chosen):
@@ -350,6 +458,7 @@ class MainWindow(QMainWindow):
         self._sdat_path = rom_name
         self._generation += 1
         self._fill_tree()
+        self._remember_recent(path, [s['index'] for s in chosen])
 
     def _clear_all(self):
         self._sdats.clear()
