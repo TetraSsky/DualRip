@@ -85,6 +85,8 @@ class MainWindow(QMainWindow):
         self._cache = OrderedDict() # (gen, sdat_key, arc_id, index, rate) -> RenderResult
         self._preview_worker = None
         self._preview_key = None
+        self._playing_item = None
+        self._item_index = {}
         self._generation = 0
 
         self._build_menu()
@@ -176,6 +178,7 @@ class MainWindow(QMainWindow):
         self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.tree.currentItemChanged.connect(self._selection_changed)
         self.tree.itemActivated.connect(lambda *_: self.play_selected())
+        self.tree.installEventFilter(self)
 
         self.empty_placeholder = QLabel('Open a sound_data.sdat or .nds ROM to get started\n''(File > Open SDAT/NDS..., or Ctrl+O)')
         self.empty_placeholder.setAlignment(Qt.AlignCenter)
@@ -226,6 +229,7 @@ class MainWindow(QMainWindow):
 
         self.player = PlayerBar(right)
         self.player.play_clicked.connect(self._on_play_clicked)
+        self.player.loaded_changed.connect(self._on_loaded_changed)
         self.player.setVisible(False)
         rv.addWidget(self.player)
         rv.addStretch(1)
@@ -245,6 +249,8 @@ class MainWindow(QMainWindow):
         self.btn_export_sel.clicked.connect(self.export_selection)
         self.btn_export_all = QPushButton('Export all...')
         self.btn_export_all.clicked.connect(self.export_all)
+        self.btn_export_sel.setFocusPolicy(Qt.NoFocus)
+        self.btn_export_all.setFocusPolicy(Qt.NoFocus)
         export_row.addStretch(1)
         export_row.addWidget(self.btn_export_sel)
         export_row.addWidget(self.btn_export_all)
@@ -350,6 +356,7 @@ class MainWindow(QMainWindow):
         self._resolvers.clear()
         self._cache.clear()
         self.player.clear()
+        self._item_index = {}
         self.filter_edit.clear()
 
     def _pick_sdats_from_rom(self, rom_path, sdats):
@@ -399,6 +406,7 @@ class MainWindow(QMainWindow):
 
     def _fill_tree(self):
         self.tree.clear()
+        self._item_index = {}
         single = len(self._sdats) == 1
 
         for sdat_key, (label, sdat) in self._sdats.items():
@@ -443,6 +451,7 @@ class MainWindow(QMainWindow):
                     it.setData(0, ROLE_ARC, arc_id)
                     it.setData(0, ROLE_INDEX, e.index)
                     _set_sdat(it)
+                    self._item_index[(sdat_key, arc_id, e.index)] = it
                     top.addChild(it)
                     playable += 1
                 top.setText(2, f'{playable} entries')
@@ -464,6 +473,7 @@ class MainWindow(QMainWindow):
                 it.setData(0, ROLE_KIND, 'seq')
                 it.setData(0, ROLE_INDEX, sid)
                 _set_sdat(it)
+                self._item_index[(sdat_key, ('SSEQ', sid), sid)] = it
                 cat_seq.addChild(it)
             sdat_root.addChild(cat_seq)
 
@@ -725,7 +735,58 @@ class MainWindow(QMainWindow):
     def eventFilter(self, obj, event):
         if obj is getattr(self, '_left_panel', None) and event.type() == QEvent.Resize:
             self._update_render_progress_width()
+        elif (
+            obj is getattr(self, 'tree', None)
+            and event.type() == QEvent.KeyPress
+            and event.key() == Qt.Key_Space
+            and not event.modifiers()
+            and not event.isAutoRepeat()
+        ):
+            self._toggle_play_pause()
+            return True
         return super().eventFilter(obj, event)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Space and not event.modifiers() and not event.isAutoRepeat():
+            self._toggle_play_pause()
+            return
+        super().keyPressEvent(event)
+
+    def _on_loaded_changed(self, key):
+        """
+        Player's loaded track changed: bold the matching tree row.
+
+        key is a cache key (generation, sdat_key, arc_id, entry_index, rate) or None.
+        """
+        item = None if key is None else self._item_index.get(tuple(key[1:4]))
+        self._set_playing_item(item)
+
+    def _set_playing_item(self, item):
+        """Bold row for tree item currently loaded in player."""
+        if self._playing_item is item:
+            return
+        if self._playing_item is not None:
+            self._set_row_bold(self._playing_item, False)
+        self._playing_item = item
+        if item is not None:
+            self._set_row_bold(item, True)
+
+    def _set_row_bold(self, item, bold):
+        for col in range(self.tree.columnCount()):
+            f = item.font(col)
+            f.setBold(bold)
+            item.setFont(col, f)
+
+    def _toggle_play_pause(self):
+        if not self._sdats:
+            return
+        st = audio.state()
+        if st == audio.PLAYING:
+            audio.pause()
+        elif st == audio.PAUSED:
+            self.player.resume()
+        else:
+            self._on_play_clicked()
 
     def _on_play_clicked(self):
         sdat, sk, seqarc, entry = self._current_playable()
@@ -828,8 +889,9 @@ class MainWindow(QMainWindow):
     def _play(self, key, res):
         if self.player.load_result(key, res, self.settings['rate']):
             self.statusBar().showMessage(f'{res.name}: {res.duration:.2f}s')
-        else:
-            self.statusBar().showMessage('Playback unavailable (sounddevice missing or no audio output device).')
+            return True
+        self.statusBar().showMessage('Playback unavailable (sounddevice missing or no audio output device).')
+        return False
 
     def _evict_cache(self):
         def total_bytes():
@@ -845,6 +907,8 @@ class MainWindow(QMainWindow):
         self._hide_render_progress()
         self._finish_preview_worker()
         self._preview_key = None
+        if res.audio is None:
+            self.player.clear()
         self._cache[key] = res
         self._cache.move_to_end(key)
         self._evict_cache()
@@ -865,6 +929,7 @@ class MainWindow(QMainWindow):
         self._hide_render_progress()
         self._finish_preview_worker()
         self._preview_key = None
+        self.player.clear()
         self.statusBar().showMessage(f'Render failed: {msg}')
 
     # -- export --------------------------------------------------------------

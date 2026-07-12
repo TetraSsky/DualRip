@@ -66,11 +66,12 @@ class SeekSlider(QSlider):
 
 class PlayerBar(QFrame):
     play_clicked = Signal() # the main window decides what to (re)render
+    loaded_changed = Signal(object) # cache key of loaded track
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFrameShape(QFrame.StyledPanel)
-        self.loaded_key = None
+        self._loaded_key = None
         self._rate = 0
         self._dragging = False
 
@@ -103,6 +104,8 @@ class PlayerBar(QFrame):
         bottom.addWidget(self.btn_pause)
         bottom.addWidget(self.btn_stop)
         bottom.addStretch(1)
+        for w in (self.btn_play, self.btn_pause, self.btn_stop, self.chk_loop):
+            w.setFocusPolicy(Qt.NoFocus)
 
         self.vol_slider = QSlider(Qt.Horizontal, self)
         self.vol_slider.setRange(0, 100)
@@ -130,13 +133,22 @@ class PlayerBar(QFrame):
         if not audio.available():
             self.setToolTip('sounddevice is not installed; playback disabled')
 
+    @property
+    def loaded_key(self):
+        return self._loaded_key
+
+    def _set_loaded_key(self, key):
+        if key != self._loaded_key:
+            self._loaded_key = key
+            self.loaded_changed.emit(key)
+
     def load_result(self, key, res, rate):
         marks = None
         if res.loop_start is not None:
             marks = (round(res.loop_start * rate), round(res.loop_end * rate))
         if not audio.load(res.audio, rate, marks[0] if marks else None, marks[1] if marks else None):
             return False
-        self.loaded_key = key
+        self._set_loaded_key(key)
         self._rate = rate
         self.slider.setRange(0, max(audio.duration() - 1, 0))
         audio.set_loop(self.chk_loop.isChecked())
@@ -147,7 +159,7 @@ class PlayerBar(QFrame):
 
     def begin_stream(self, key, rate):
         """Arm bar for streaming render. Full-track estimate arrives in ~300ms (sequencer-only), then exact total snaps at finalize."""
-        self.loaded_key = key
+        self._set_loaded_key(key)
         self._rate = rate
         self.slider.setRange(0, 0)
         self.slider.set_buffered_fraction(0.0)
@@ -156,7 +168,7 @@ class PlayerBar(QFrame):
 
     def begin_live(self, key, rate):
         """Arm bar for live (ring) music render. Whole track seekable from start via checkpoints — no buffered band, drag jumps instantly."""
-        self.loaded_key = key
+        self._set_loaded_key(key)
         self._rate = rate
         self.slider.setRange(0, 0)
         self.slider.set_buffered_fraction(1.0)
@@ -168,7 +180,7 @@ class PlayerBar(QFrame):
 
     def clear(self):
         audio.unload()
-        self.loaded_key = None
+        self._set_loaded_key(None)
         self._timer.stop()
         self.slider.setRange(0, 0)
         self.lbl_time.setText('-')
