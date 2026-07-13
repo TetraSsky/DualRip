@@ -2,10 +2,10 @@
 DualRip dialogs: Settings and the Export confirmation/log window.
 """
 
+import json
 import os
-
 from PySide6.QtCore import QSettings
-from PySide6.QtGui import QFontDatabase
+from PySide6.QtGui import QFontDatabase, QPalette
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -46,6 +46,19 @@ def save_settings(values):
     for k, v in values.items():
         s.setValue(k, v)
 
+def load_recent_files():
+    """[{'path': str, 'sdats': [int, ...] or None}], most recent first."""
+    s = QSettings('DualRip', 'DualRip')
+    try:
+        entries = json.loads(s.value('recent_files', '[]') or '[]')
+        return [e for e in entries if isinstance(e, dict) and e.get('path')]
+    except (TypeError, ValueError):
+        return []
+
+def save_recent_files(entries):
+    s = QSettings('DualRip', 'DualRip')
+    s.setValue('recent_files', json.dumps(entries))
+
 class SettingsDialog(QDialog):
     """Output folder, sample rate, bank-map override."""
     def __init__(self, parent=None):
@@ -77,7 +90,7 @@ class SettingsDialog(QDialog):
 
         hint = QLabel('Bank map replaces the automatic resolution of NULL/ dynamic bank slots. Candidates separated by "+" are tried in order; the first bank able to play all the entry\'s instruments wins.')
         hint.setWordWrap(True)
-        hint.setStyleSheet('color: gray;')
+        hint.setForegroundRole(QPalette.PlaceholderText)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self._accept)
