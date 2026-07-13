@@ -199,7 +199,7 @@ class MainWindow(QMainWindow):
         )
         self.empty_placeholder.setAlignment(Qt.AlignCenter)
         self.empty_placeholder.setWordWrap(True)
-        self.empty_placeholder.setStyleSheet('color: gray;')
+        self.empty_placeholder.setForegroundRole(QPalette.PlaceholderText)
 
         self.tree_stack = QStackedWidget(left)
         self.tree_stack.addWidget(self.tree)
@@ -257,7 +257,7 @@ class MainWindow(QMainWindow):
             'sound effects, archives or music sequences.'
         )
         note.setWordWrap(True)
-        note.setStyleSheet('color: gray;')
+        note.setForegroundRole(QPalette.PlaceholderText)
         rv.addWidget(note)
 
         export_row = QHBoxLayout()
@@ -398,7 +398,10 @@ class MainWindow(QMainWindow):
         self.empty_placeholder.setAutoFillBackground(active)
         if active:
             pal = self.empty_placeholder.palette()
-            pal.setColor(QPalette.Window, self.palette().color(QPalette.Window).darker)
+            base = self.palette().color(QPalette.Window)
+            pal.setColor(QPalette.Window, base.darker())
+            pal.setColor(QPalette.WindowText, self.palette().color(QPalette.WindowText))
+            pal.setColor(QPalette.PlaceholderText, self.palette().color(QPalette.WindowText))
             self.empty_placeholder.setPalette(pal)
         else:
             self.empty_placeholder.setPalette(self.palette())

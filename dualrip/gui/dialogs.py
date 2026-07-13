@@ -5,7 +5,7 @@ DualRip dialogs: Settings and the Export confirmation/log window.
 import json
 import os
 from PySide6.QtCore import QSettings
-from PySide6.QtGui import QFontDatabase
+from PySide6.QtGui import QFontDatabase, QPalette
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -90,7 +90,7 @@ class SettingsDialog(QDialog):
 
         hint = QLabel('Bank map replaces the automatic resolution of NULL/ dynamic bank slots. Candidates separated by "+" are tried in order; the first bank able to play all the entry\'s instruments wins.')
         hint.setWordWrap(True)
-        hint.setStyleSheet('color: gray;')
+        hint.setForegroundRole(QPalette.PlaceholderText)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self._accept)
