@@ -1,11 +1,8 @@
-# Part of DualRip. Render entry points (streaming + batch) + duration estimator.
-# Faithful port of FeOS Sound System (fincs) / CyberBotX/in_xsf, derived from
-# NNS driver disassembly.
-# FIDELITY-CRITICAL: C integer semantics, clock/emit arithmetic are intentional.
+"""DS render entry points."""
 
 import copy
 import numpy as np
-from ..cprims import (
+from .cprims import (
     CS_ATTACK,
     CS_NONE,
     CS_RELEASE,
@@ -20,14 +17,7 @@ from .sequencer import Player
 STREAM_CHUNK_SAMPLES = 8820
 
 class LiveRenderer:
-    """
-    Resumable, seekable driver for one SSAR/SSEQ entry.
-
-    Owns a Player + clock/emit bookkeeping. step(produce=True) > int16 block, step(produce=False) > silent fast-forward (bit-exact state advance).
-    snapshot()/from_snapshot() enable checkpoint+ffwd seek in live preview.
-
-    Raw policy: loop_passes loop iterations, full release envelopes, native rests, PSG/noise endless notes released hold_seconds after idle, ~15ms cold-start warm-up skipped. player_prio = cpr from SDAT INFO.
-    """
+    """Resumable, seekable driver for one sequence entry."""
 
     def __init__(self, blob, start_offset, bank, waveArc, entry_volume, rate, hold_seconds=2.0, player_prio=0, loop_passes=1):
         self.rate = rate
@@ -54,7 +44,7 @@ class LiveRenderer:
         }
 
     def snapshot(self):
-        """An opaque, restore-able copy of the full render state at self.emitted."""
+        """Restorable copy of the render state."""
         ply = copy.deepcopy(self.ply, self._share_memo(self.ply))
         return {
             'ply': ply,
@@ -72,7 +62,7 @@ class LiveRenderer:
 
     @classmethod
     def from_snapshot(cls, snap):
-        """Build renderer from snapshot (copies Player, snapshot reusable)."""
+        """Renderer rebuilt from a snapshot."""
         r = cls.__new__(cls)
         r.rate = snap['rate']
         r.hold_seconds = snap['hold_seconds']
@@ -100,22 +90,14 @@ class LiveRenderer:
         return None
 
     def step(self, produce=True):
-        """
-        Advance one driver clock.
-
-        Returns:
-            int16 (n, 2) ndarray when producing + past warm-up gate, else None.
-        Sets self.finished at natural render end.
-        """
+        """Advance one driver clock; returns an int16 (n, 2) block or None."""
         ply = self.ply
-        # sequencer frozen (TEMPO 0): no tick can ever run again, so tracks
-        # that are not ended never will be -- exact condition, not a time cap
+        # frozen (tempo 0): no tick will ever run again, tracks can't advance
         frozen = ply.tempo == 0 and ply.tempoCount < 240
         if not ply.any_channel_active() and (ply.all_tracks_ended() or frozen):
             self.finished = True
             return None
-        # "idle": every track has ended, is suspended waiting for an endless
-        # note's channel to die, or can never run again
+        # idle: every track ended, waiting on an endless note, or frozen
         idle = frozen or all(
             ply.tracks[t].state[TS_END] or ply.tracks[t].waitChn for t in ply.trackIds
         )
@@ -123,8 +105,7 @@ class LiveRenderer:
             if self.ended_at is None:
                 self.ended_at = self.total
             elif self.total - self.ended_at > self.hold_seconds * self.rate:
-                # release ringing infinite notes (looped samples, PSG, noise);
-                # one-shot PCM notes die on their own at the end of the sample
+                # release ringing endless notes
                 for c in ply.channels:
                     if (
                         c.state > CS_START
@@ -178,16 +159,10 @@ class LiveRenderer:
         return out
 
     def fast_forward_to(self, target_sample):
-        """
-        Silent ffwd until emitted >= target_sample (or render ends).
-
-        Clock-granular: lands within one driver clock (~5ms) of target,
-        never before.
-        """
+        """Silent fast-forward until emitted >= target_sample or the render ends."""
         while not self.finished and self.emitted < target_sample:
             self.step(produce=False)
         return self.emitted
-
 
 def render_entry_stream(
     blob,
@@ -201,12 +176,7 @@ def render_entry_stream(
     chunk_samples=STREAM_CHUNK_SAMPLES,
     loop_passes=1,
 ):
-    """
-    Render one SSAR/SSEQ entry incrementally.
-
-    Yields ('data', int16 stereo ndarray) chunks (~STREAM_CHUNK_SAMPLES), then ('end', looped: bool, loop_marks or None). Regroups
-    LiveRenderer.step() — concatenated whole is bit-identical to a one-shot render.
-    """
+    """Yield ('data', int16 stereo) chunks, then ('end', looped, loop_marks)."""
     r = LiveRenderer(blob, start_offset, bank, waveArc, entry_volume, rate, hold_seconds, player_prio, loop_passes)
     pend = []
     pend_n = 0
@@ -223,18 +193,8 @@ def render_entry_stream(
         yield 'data', np.concatenate(pend)
     yield 'end', r.ply.loop_detected, r.loop_marks
 
-
 def estimate_end_sample(blob, start_offset, rate, player_prio=0, should_abort=None, abort_every=4096):
-    """
-    Sample index where the sequencer finishes (all tracks ended/frozen).
-
-    Runs the REAL sequencer with an empty bank — no note can allocate a channel, so only track/tempo/loop logic runs (~500-1000× faster than full render). Lower bound (release tails excluded); snap to exact total at render finalize.
-    Clock/emit arithmetic mirrors render_entry_stream (including warm-up gate) > sample-for-sample alignment.
-
-    Args:
-        should_abort: callable polled every abort_every clocks; return True
-            to abort (returns None).
-    """
+    """Sample where the sequencer ends, run with an empty bank so nothing synthesizes."""
     ply = Player(blob, [], [None, None, None, None], rate, 0, player_prio)
     ply.setup(start_offset)
     ply.timer()
@@ -267,13 +227,7 @@ def estimate_end_sample(blob, start_offset, rate, player_prio=0, should_abort=No
             return None
 
 def render_entry(blob, start_offset, bank, waveArc, entry_volume, rate, hold_seconds=2.0, player_prio=0, loop_passes=1):
-    """
-    Render one SSAR/SSEQ entry → single stereo int16 buffer.
-
-    Returns:
-        (stereo int16 ndarray, looped: bool, loop_marks: (start, end) or None).
-    Bit-identical to render_entry_stream concatenation.
-    """
+    """Render one sequence entry to a single int16 stereo buffer."""
     chunks = []
     looped = False
     marks = None

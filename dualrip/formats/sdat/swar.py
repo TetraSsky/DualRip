@@ -1,6 +1,4 @@
-# Part of DualRip. SWAR/WAV parsing + IMA-ADPCM decode. Ported from FeOS Sound
-# System (fincs) / CyberBotX/in_xsf, derived from NNS driver disassembly.
-# FIDELITY-CRITICAL: C integer semantics, table indexing are intentional.
+"""SWAR wave-archive parsing and IMA-ADPCM decode."""
 
 import struct
 import numpy as np
@@ -20,15 +18,7 @@ IMA_STEP_TABLE = (
 )
 
 def decode_adpcm(raw):
-    """
-    Decode IMA-ADPCM block to int32 samples.
-
-    Args:
-        raw: bytes, 4-byte header (pred, index) + nibble-packed data.
-
-    Returns:
-        np.ndarray[int32] of decoded samples.
-    """
+    """Decode an IMA-ADPCM block to int32 samples."""
     pred = struct.unpack_from('<h', raw, 0)[0]
     index = min(struct.unpack_from('<H', raw, 2)[0], 88)
     n = len(raw) - 4
@@ -64,6 +54,7 @@ def decode_adpcm(raw):
     return out
 
 class Swav:
+    """One SWAV waveform."""
     __slots__ = ('waveType', 'loop', 'sampleRate', 'time', 'loopStart', 'length', 'data')
 
     def __init__(self, data, off):
@@ -90,7 +81,7 @@ class Swav:
         return self
 
 def parse_swar(data):
-    """Parse SWAR blob, return list of Swav."""
+    """Parse an SWAR blob into a list of Swav."""
     count = struct.unpack_from('<I', data, NNS_RECORD_COUNT_OFF)[0]
     offs = struct.unpack_from('<%dI' % count, data, NNS_RECORD_TABLE_OFF)
     return [Swav(data, off) for off in offs]

@@ -1,10 +1,4 @@
-"""
-SDAT container access for DualRip.
-
-This is the ONLY module that touches ndspy. Everything else works on plain
-Python/numpy structures, so the container backend can be swapped or
-internalized later without touching the engine.
-"""
+"""SDAT container access, the only module that touches ndspy."""
 
 import struct
 import ndspy.soundArchive
@@ -17,12 +11,12 @@ from .sbnk import parse_sbnk
 from .swar import parse_swar
 
 def _swar_wave_count(war):
-    """Number of waves in an ndspy wave archive, without decoding samples."""
+    """Wave count of a wave archive without decoding samples."""
     raw = bytes(war.save()[0][: NNS_RECORD_COUNT_OFF + 4])
     return struct.unpack_from('<I', raw, NNS_RECORD_COUNT_OFF)[0]
 
 class SeqArcEntry:
-    """One sound entry of a sequence archive (SSAR)."""
+    """One entry of a sequence archive."""
 
     __slots__ = ('index', 'name', 'bank_id', 'volume', 'cpr', 'offset')
 
@@ -35,12 +29,7 @@ class SeqArcEntry:
         self.offset = offset # None for null/placeholder slots
 
 class SeqArc:
-    """
-    Sequence archive: shared event blob + entry table.
-
-    Standalone SSEQ is modelled as a one-entry SeqArc with arc_id ('SSEQ', seq_id) — flows through the same render_one / BankResolver
-    Path as SSAR, zero special casing in the engine.
-    """
+    """Sequence archive: a shared event blob and its entry table."""
 
     __slots__ = ('arc_id', 'name', 'blob', 'entries')
 
@@ -68,7 +57,7 @@ class SdatFile:
 
     @classmethod
     def from_bytes(cls, data: bytes, label: str = '<ROM>') -> 'SdatFile':
-        """Construct an SdatFile from raw SDAT bytes (e.g. extracted from a .nds ROM)."""
+        """Construct an SdatFile from raw SDAT bytes."""
         inst = cls.__new__(cls)
         inst.path = label
         inst._sdat = ndspy.soundArchive.SDAT(data)
@@ -104,7 +93,7 @@ class SdatFile:
                             sname or f'SEQ_{idx}',
                             seq.bankID,
                             seq.volume,
-                            seq.channelPressure, # ndspy's name for cpr
+                            seq.channelPressure,
                             seq.firstEventOffset,
                         )
                     )
@@ -123,12 +112,7 @@ class SdatFile:
         return out
 
     def sequence(self, seq_id):
-        """
-        Standalone SSEQ as a one-entry SeqArc (arc_id=('SSEQ', seq_id)).
-
-        Entry index = seq_id (used for filenames/manifests), offset = 0
-        (SSEQ carries only its own events, no shared blob).
-        """
+        """Standalone SSEQ as a one-entry SeqArc."""
         if seq_id not in self._seq_cache:
             name, seq = self._sdat.sequences[seq_id]
             if seq is None:
@@ -143,8 +127,7 @@ class SdatFile:
 
     @property
     def bank_list(self):
-        """[(bank_id, name_or_None, wave_archive_ids_or_None)]; None ids for
-        NULL/dynamic slots."""
+        """[(bank_id, name or None, wave archive ids or None)] for every bank."""
         out = []
         for i, (name, bnk) in enumerate(self._sdat.banks):
             if bnk is None:
@@ -175,7 +158,7 @@ class SdatFile:
         return not 0 <= bid < len(self._sdat.banks) or self._sdat.banks[bid][1] is None
 
     def _bank_slot_ids(self, bnk):
-        """Wave archive IDs for this bank, normalized to BANK_WAVE_ARCHIVE_SLOTS entries (None = empty/invalid/NO_WAVE_ARCHIVE sentinel)."""
+        """Bank's wave-archive ids padded to the slot count, None for empty slots."""
         wids = []
         for wid in list(bnk.waveArchiveIDs)[:BANK_WAVE_ARCHIVE_SLOTS]:
             if (
@@ -191,7 +174,7 @@ class SdatFile:
         return wids
 
     def bank_meta(self, bid):
-        """Return (patch entries, wave counts per slot, wave archive ids) without decoding samples. None for null banks."""
+        """(patch entries, per-slot wave counts, wave-archive ids) without decoding, None for null banks."""
         if bid not in self._meta_cache:
             if self.bank_is_null(bid):
                 self._meta_cache[bid] = None

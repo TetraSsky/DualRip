@@ -1,9 +1,7 @@
-# Part of DualRip. Bank resolution — static patch scanner + auto-mapping for
-# NULL/dynamic bank slots via family-affinity + exclusivity-weighted coverage.
-# FIDELITY-CRITICAL: SSEQ bytecode walk must be exact.
+"""Bank resolution: patch scanning and auto-mapping for null bank slots."""
 
 from collections import Counter
-from .engine.sequencer import (
+from .engine.sdat.sequencer import (
     EXTRA_BYTE,
     SSEQ_CMD_CALL,
     SSEQ_CMD_FIN,
@@ -23,7 +21,7 @@ from .engine.sequencer import (
 MAX_SCAN_STEPS = 2000 # per-branch safety bound for malformed bytecode
 
 def scan_patches(blob, off):
-    """Static scan of the patches (instrument numbers) a sequence entry uses."""
+    """Instrument numbers a sequence entry uses."""
     out = set()
     todo = [off]
     seen = set()
@@ -66,12 +64,7 @@ def scan_patches(blob, off):
     return out or {0}
 
 def patch_playable(entries, slot_sizes, p):
-    """
-    True if patch p resolves all instruments to valid samples.
-
-    Args:
-        slot_sizes: wave count per archive slot in the bank (length <= 4).
-    """
+    """True if patch p resolves every instrument to a valid sample."""
     if p >= len(entries) or not entries[p].record:
         return False
     for inst in entries[p].instruments:
@@ -90,7 +83,7 @@ def parse_bank_map(text):
     return out
 
 class BankResolver:
-    """Resolve NULL/dynamic bank slots via family-affinity + coverage ranking."""
+    """Resolver for null/dynamic bank slots."""
 
     def __init__(self, sdat, seqarc, override_map=None):
         self.sdat = sdat
@@ -124,8 +117,7 @@ class BankResolver:
             for i, ps in self._entry_ps.items():
                 if all(patch_playable(ent, cnts, p) for p in ps):
                     coverers[i].append(bid)
-        # exclusivity-weighted coverage: an entry only one bank can play
-        # weighs 1, an entry every bank can play weighs almost nothing
+        # weight each entry by exclusivity: playable by one bank = 1, by all = near 0
         scores = {}
         for i, bids in coverers.items():
             if not bids:
@@ -133,10 +125,7 @@ class BankResolver:
             w = 1.0 / len(bids)
             for b in bids:
                 scores[b] = scores.get(b, 0.0) + w
-        # family affinity: each (slot, archive) pair carries the coverage
-        # mass of the banks sharing it, so the family that actually plays
-        # this archive dominates (e.g. a shared/base bank plus per-level
-        # or per-object banks that all reuse the same slot layout)
+        # family affinity: each (slot, archive) pair carries the coverage mass of the banks sharing it
         pair_mass = Counter()
         for b, sc in scores.items():
             for s, wid in enumerate(self.sdat.bank_meta(b)[2]):

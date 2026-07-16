@@ -1,6 +1,4 @@
-"""
-DualRip -- Nintendo DS SDAT sound-effect (SSAR & SSEQ) ripper.
-"""
+"""Nintendo DS and 3DS audio ripper."""
 
 from ._version import __version__
 

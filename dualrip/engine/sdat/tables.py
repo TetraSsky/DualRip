@@ -1,6 +1,4 @@
-# Part of DualRip. Lookup tables from FeOS Sound System (fincs) / CyberBotX/in_xsf,
-# derived from Nintendo NNS driver disassembly. FIDELITY-CRITICAL: do not edit.
-# C integer semantics (truncating division, arithmetic shifts) are intentional.
+"""DS driver lookup tables."""
 
 GETPITCHTBL = (
     0, 59, 118, 178, 237, 296, 356, 415,

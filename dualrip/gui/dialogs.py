@@ -1,6 +1,4 @@
-"""
-DualRip dialogs: Settings and the Export confirmation/log window.
-"""
+"""Settings and Export dialogs."""
 
 import json
 import os
@@ -24,7 +22,7 @@ from PySide6.QtWidgets import (
 from ..bankmap import parse_bank_map
 from .workers import BatchWorker
 
-RATES = ('32728', '44100', '48000') # presets; combo stays editable
+RATES = ('32728', '44100', '48000') # presets, combo stays editable
 RATE_MIN, RATE_MAX = 8000, 192000
 EXPORT_DIALOG_SIZE = (680, 460)
 LOG_MAX_LINES = 20000 # prevent unbounded log growth on huge batches
@@ -39,6 +37,7 @@ def load_settings():
         'out_dir': s.value('out_dir', '') or '',
         'rate': rate,
         'bank_map': s.value('bank_map', '') or '',
+        'boot9': s.value('boot9', '') or '',
     }
 
 def save_settings(values):
@@ -60,7 +59,7 @@ def save_recent_files(entries):
     s.setValue('recent_files', json.dumps(entries))
 
 class SettingsDialog(QDialog):
-    """Output folder, sample rate, bank-map override."""
+    """Settings dialog."""
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle('Settings')
@@ -88,6 +87,15 @@ class SettingsDialog(QDialog):
         self.ed_map.setPlaceholderText('e.g. 4=32+33+43,30=6  (empty = automatic)')
         form.addRow('Bank map override', self.ed_map)
 
+        row9 = QHBoxLayout()
+        self.ed_boot9 = QLineEdit(cur['boot9'])
+        self.ed_boot9.setPlaceholderText('Select File... (encrypted 3DS ROMs)')
+        btn9 = QPushButton('Browse...')
+        btn9.clicked.connect(self._browse_boot9)
+        row9.addWidget(self.ed_boot9, 1)
+        row9.addWidget(btn9)
+        form.addRow('3DS boot ROM (boot9.bin)', row9)
+
         hint = QLabel('Bank map replaces the automatic resolution of NULL/ dynamic bank slots. Candidates separated by "+" are tried in order; the first bank able to play all the entry\'s instruments wins.')
         hint.setWordWrap(True)
         hint.setForegroundRole(QPalette.PlaceholderText)
@@ -106,6 +114,13 @@ class SettingsDialog(QDialog):
         if d:
             self.ed_out.setText(d)
 
+    def _browse_boot9(self):
+        f, _ = QFileDialog.getOpenFileName(
+            self, '3DS boot ROM', self.ed_boot9.text(),
+            'Boot ROM (*.bin);;All files (*)')
+        if f:
+            self.ed_boot9.setText(f)
+
     def _accept(self):
         try:
             rate = int(self.cb_rate.currentText())
@@ -119,22 +134,22 @@ class SettingsDialog(QDialog):
         except Exception:
             QMessageBox.warning(self, 'Settings', 'Invalid bank map. Expected form: 4=32+33,30=6')
             return
+        boot9 = self.ed_boot9.text().strip()
+        if boot9 and not os.path.isfile(boot9):
+            QMessageBox.warning(self, 'Settings', 'Boot ROM file not found.')
+            return
         save_settings(
             {
                 'out_dir': self.ed_out.text().strip(),
                 'rate': rate,
                 'bank_map': self.ed_map.text().strip(),
+                'boot9': boot9,
             }
         )
         self.accept()
 
 class ExportDialog(QDialog):
-    """
-    Confirmation + live log window for a batch export.
-
-    sdats: OrderedDict[sdat_key, (label, SdatFile)]
-    jobs: [(sdat_key, kind, ident, sel)] where kind is 'arc' (ident=arc_id) or 'seq' (ident=None); sel is a set of indices/ids or None for all.
-    """
+    """Confirmation and live-log window for a batch export."""
 
     def __init__(self, sdats, jobs, rate, override_map, parent=None):
         super().__init__(parent)
@@ -199,6 +214,8 @@ class ExportDialog(QDialog):
             return len(sel) if sel is not None else len(self._all_seq_ids(sk))
         if sel is not None:
             return len(sel)
+        if kind == 'carc':
+            return len(sdat.folders[ident])
         return len(sdat.seqarc(ident).entries)
 
     def _plan(self):
@@ -206,7 +223,16 @@ class ExportDialog(QDialog):
         for sk, kind, ident, sel in self._jobs:
             sdat = self._sdat(sk)
             sdat_label = self._sdats[sk][0]
-            if kind == 'seq':
+            if kind == 'carc':
+                members = sdat.folders[ident]
+                if sel is None:
+                    self.log.appendPlainText(f'[{sdat_label}] {ident} - all {len(members)} sounds')
+                else:
+                    self.log.appendPlainText(f'[{sdat_label}] {ident} - {len(sel)} sounds:')
+                    for s in members:
+                        if s.index in sel:
+                            self.log.appendPlainText(f'[{s.index:4d}] {s.name}')
+            elif kind == 'seq':
                 seq_names = {sid: name for sid, name, _b in sdat.sequence_list}
                 ids = sorted(sel) if sel is not None else self._all_seq_ids(sk)
                 if sel is None:
@@ -253,7 +279,7 @@ class ExportDialog(QDialog):
         if res.status in ('ok', 'loop'):
             extra = f'{res.duration:7.2f}s'
             if res.loop_start is not None:
-                extra += f' loop {res.loop_start:.3f}-{res.loop_end:.3f}s'
+                extra += f'loop {res.loop_start:.3f}-{res.loop_end:.3f}s'
             line = f'[{res.index:3d}] {res.name:44s} {res.status:5s} {extra}'
         elif res.status == 'error':
             line = f'[{res.index:3d}] {res.name:44s} ERROR {res.error}'

@@ -1,4 +1,5 @@
 numpy
 ndspy
+pyctr
 PySide6
 sounddevice

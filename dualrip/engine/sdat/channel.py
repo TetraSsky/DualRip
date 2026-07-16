@@ -1,9 +1,7 @@
-# Part of DualRip. Channel synthesis + ADSR envelopes. Faithful port of FeOS
-# Sound System (fincs) / CyberBotX/in_xsf, derived from NNS driver disassembly.
-# FIDELITY-CRITICAL: C integer semantics, volume/pan arithmetic are intentional.
+"""DS channel synthesis: ADSR, sample playback, mixing."""
 
 import numpy as np
-from ..cprims import (
+from .cprims import (
     AMPL_K,
     AMPL_THRESHOLD,
     ARM7_CLOCK,
@@ -28,10 +26,10 @@ from ..cprims import (
     cnv_sust,
     timer_adjust,
 )
-from ..tables import GETVOLTBL, WAVEDUTYTBL
+from .tables import GETVOLTBL, WAVEDUTYTBL
 
 class Reg:
-    """Hardware channel registers (mirrors NDS sound controller)."""
+    """One sound channel's hardware registers."""
     __slots__ = (
         'volumeMul',
         'volumeDiv',
@@ -80,7 +78,7 @@ class Reg:
         self.enable = bool((cr >> 31) & 0x01)
 
 class Channel:
-    """One NDS sound channel: ADSR state machine, sample synthesis, hw mixing."""
+    """One sound channel."""
     def __init__(self, chn_id, player):
         self.chnId = chn_id
         self.ply = player
@@ -123,7 +121,6 @@ class Channel:
         self.cut_at_wrap = False
         self.loop_pass_sample = None
 
-    # --- FSS Chn_UpdateVol
     def update_vol(self, trk):
         final = self.ply.masterVol + self.ply.sseqVol
         final += cnv_sust(trk.vol) + cnv_sust(trk.expr)
@@ -147,11 +144,7 @@ class Channel:
         self.modDelay = trk.modDelay
 
     def update_porta(self, trk, gate=None):
-        # `gate` is the note event's written length in ticks. For normal notes
-        # it equals noteLength; for tie-mode notes the channel is endless
-        # (noteLength -1) but Nintendo's driver still sweeps the portamento
-        # over the written note length. (FSS/NCSF drop the sweep in that case,
-        # which silences the pitch glide some games apply to tied notes.)
+        # gate = the note's written length, a tie note is endless but still sweeps over it
         self.manualSweep = False
         self.sweepPitch = trk.sweepPitch
         self.sweepCnt = 0
@@ -180,7 +173,6 @@ class Channel:
         self.vol = 0
         self.noteLength = -1
 
-    # --- FSS Chn_UpdateTracks
     def update_track(self):
         if self.trackId == -1:
             return
@@ -214,7 +206,6 @@ class Channel:
                 for t in (old, new):
                     self.flags[F_UPDTMR if t == 0 else (F_UPDPAN if t == 2 else F_UPDVOL)] = True
 
-    # --- FSS Snd_UpdChannel
     def update(self):
         if self.state > CS_START and not self.reg.enable:
             self.kill()
@@ -334,22 +325,8 @@ class Channel:
             self.reg.set_cr(cr)
 
     def generate_block(self, n, produce=True):
-        """
-        Advance channel by n samples.
-
-        Args:
-            n: number of samples to advance.
-            produce: if True, return (left, right) int64 arrays. If False,
-                advance the same internal state (sample position, PSG/noise
-                LFSR, loop-pass, kill/loop detection) without synthesizing —
-                used for silent fast-forward in live preview seek.
-
-        Returns:
-            (left, right) int64 ndarrays or None (when produce=False).
-
-        The state path is identical in both modes so checkpoint/seek is
-        bit-exact.
-        """
+        """Advance n samples; with produce, returns (left, right) int64, else None."""
+        # state path is identical either way, so produce-off fast-forward stays bit-exact
         reg = self.reg
         inc = reg.sampleIncrease
         pos0 = reg.samplePosition
@@ -387,7 +364,7 @@ class Channel:
                 samples = (d0 + frac * (d1 - d0)).astype(np.int64)
                 samples[~valid] = 0
             if reg.repeatMode == 1 and self.loop_pass_sample is None and inc > 0:
-                # remember when the playhead first enters the loop region
+                # first sample where the playhead enters the loop
                 if pos0 + inc * n > loopStart:
                     k0 = 0 if pos0 >= loopStart else int(np.ceil((loopStart - pos0) / inc))
                     if k0 < n:
@@ -395,8 +372,7 @@ class Channel:
             if self.cut_at_wrap and reg.repeatMode == 1:
                 past = positions >= totalLen
                 if past.any():
-                    # raw mode: stop an endless looped note after one full
-                    # pass through the sample, and record the loop points
+                    # stop an endless looped note after one pass, record the loop points
                     if produce:
                         samples[past] = 0
                     self.kill_after_block = True
@@ -457,7 +433,7 @@ class Channel:
         if not produce:
             return None
 
-        # hardware volume & pan (NCSF GenerateSamples)
+        # hardware volume and pan
         datashift = reg.volumeDiv
         if datashift == 3:
             datashift = 4

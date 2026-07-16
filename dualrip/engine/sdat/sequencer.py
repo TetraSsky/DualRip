@@ -1,8 +1,6 @@
-# Part of DualRip. SSEQ bytecode interpreter — faithful port of FeOS Sound
-# System (fincs) / CyberBotX/in_xsf, derived from NNS driver disassembly.
-# FIDELITY-CRITICAL: C integer semantics, literal dispatches are intentional.
+"""DS SSEQ bytecode interpreter."""
 
-from ..cprims import (
+from .cprims import (
     CS_NONE,
     CS_RELEASE,
     CS_START,
@@ -34,7 +32,7 @@ from ..cprims import (
 from .channel import Channel
 
 def readvl(blob, pc):
-    """Read variable-length int from SSEQ bytecode, return (value, new_pc)."""
+    """Variable-length int at pc, returns (value, next_pc)."""
     x = 0
     while True:
         d = blob[pc]
@@ -44,18 +42,16 @@ def readvl(blob, pc):
             break
     return x, pc
 
-# SSEQ opcodes exposed for bankmap.py (static patch scanner).
-# Inside Track.run() the full set is dispatched on literal values with
-# naming comments — intentionally mirrors the C++ reference line-by-line.
-SSEQ_NOTE_LIMIT = 0x80 # command values below this are note-on events
+# Opcode values used by the patch scanner
+SSEQ_NOTE_LIMIT = 0x80 # below this = note-on
 SSEQ_CMD_PATCH = 0x81
 SSEQ_CMD_OPEN_TRACK = 0x93
 SSEQ_CMD_GOTO = 0x94
 SSEQ_CMD_CALL = 0x95
 SSEQ_CMD_RANDOM = 0xA0
 SSEQ_CMD_FROM_VAR = 0xA1
-SSEQ_VAR_CMD_FIRST = 0xB0 # variable ops / comparisons take a 1-byte
-SSEQ_VAR_CMD_LAST = 0xBD # argument in Random/FromVariable override mode
+SSEQ_VAR_CMD_FIRST = 0xB0 # 0xB0..0xBD: var ops/compares, 1-byte arg in override mode
+SSEQ_VAR_CMD_LAST = 0xBD
 SSEQ_CMD_FIN = 0xFF
 
 VARIABLE_BYTE_COUNT = 1 << 7
@@ -86,7 +82,7 @@ def sseq_command_byte_count(cmd):
     return _CMD_BYTES.get(cmd, 0)
 
 class Rng:
-    """LCG random number generator (seed 0x12345678), matches NNS driver."""
+    """Driver RNG (LCG)."""
     def __init__(self):
         self.u = 0x12345678
 
@@ -95,7 +91,7 @@ class Rng:
         return (self.u >> 16) & 0xFFFF
 
 class Track:
-    """One SSEQ track: bytecode pointer, state, note-on helpers."""
+    """One SSEQ track."""
     __slots__ = (
         'trackId',
         'state',
@@ -204,7 +200,6 @@ class Track:
         self.visited = {}
         self.passes_left = self.ply.loop_passes - 1
 
-    # override helpers
     def oval_read8(self, extra=False):
         blob = self.ply.blob
         if self.over_active:
@@ -244,7 +239,6 @@ class Track:
         self.pos += 3
         return v
 
-    # --- FSS Note_On --------------------------------------------------
     def note_on(self, key, vel, length, gate=None):
         ply = self.ply
         bank = ply.bank
@@ -295,7 +289,7 @@ class Track:
                     return -1
                 chn = ply.channels[nCh]
                 chn.tempCR = SOUND_FORMAT_PSG | SCHANNEL_ENABLE | ((noteDef.swav & 0x7) << 24)
-            chn.tempTIMER = 0x1000000 // (262 * 8) # key #60 (C4)
+            chn.tempTIMER = 0x1000000 // (262 * 8) # base timer for key 60
             chn.reg.samplePosition = -1.0
             chn.reg.psgX = 0x7FFF
             chn.reg.psgLast = 0
@@ -380,16 +374,12 @@ class Track:
             if c.state > CS_NONE and c.trackId == self.trackId and c.state != CS_RELEASE:
                 c.release()
 
-    # --- FSS Track_Run ------------------------------------------------
     def run(self):
         self.updateFlags[TF_LEN] = True
         if self.state[TS_END]:
             return
         if self.waitChn:
-            # Nintendo's driver: a note played with length 0 in note-wait mode
-            # suspends the track until the note's channel dies (e.g. a one-shot
-            # sample finishing). This is how voice clips are chained without
-            # knowing their duration in ticks. (Not implemented in FSS/NCSF.)
+            # note-wait: hold the track until this note's channel dies
             for c in self.ply.channels:
                 if c.state != CS_NONE and c.trackId == self.trackId:
                     return
@@ -440,11 +430,11 @@ class Track:
             elif cmd == 0x94: # Goto
                 dest = self.read24()
                 if dest in self.visited:
-                    # jumping into already-executed code = sequence loop
+                    # jump into already-run code = the sequence loop
                     self.ply.loop_detected = True
                     self.ply.mark_loop(self.visited[dest], self.ply.now_sample, self)
                     if self.passes_left > 0:
-                        # follow the jump like the driver: same tick, no gap
+                        # follow the jump like the driver, same tick
                         self.passes_left -= 1
                         self.visited = {}
                         self.pos = dest
@@ -499,13 +489,12 @@ class Track:
                     rPos = self.stack[self.stackPos - 1][1]
                     prevR = self.loopCount[self.stackPos - 1]
                     if not prevR:
-                        # infinite loop: play loop_passes iterations, then fall through
+                        # infinite loop: run loop_passes times, then fall through
                         self.ply.loop_detected = True
                         self.ply.mark_loop(self.stack[self.stackPos - 1][2], self.ply.now_sample, self)
                         if self.passes_left > 0:
                             self.passes_left -= 1
-                            # restamp the entry sample so the repeat pass
-                            # reports (this wrap, next wrap) on re-detection
+                            # restamp entry
                             self.stack[self.stackPos - 1] = ('loop', rPos, self.ply.now_sample)
                             self.pos = rPos
                         else:
@@ -595,7 +584,7 @@ class Track:
                     r = self.ply.rng.calc()
                     var = -(r % (-value + 1)) if value < 0 else (r % (value + 1))
                 self.ply.variables[varNo] = var
-            elif 0xB8 <= cmd <= 0xBD:  # comparisons
+            elif 0xB8 <= cmd <= 0xBD: # comparisons
                 varNo = s8(self.oval_read8(extra=True)) & 0x1F
                 value = s16(self.oval_read16())
                 var = self.ply.variables[varNo]
@@ -628,7 +617,7 @@ class Track:
             else:
                 nb = sseq_command_byte_count(cmd)
                 if nb == 0 and cmd not in (0xD6, 0xD7):
-                    # unknown command: stop this track defensively
+                    # unknown opcode: stop the track
                     self.state[TS_END] = True
                     return
                 self.pos += nb & ~(VARIABLE_BYTE_COUNT | EXTRA_BYTE)
@@ -639,20 +628,7 @@ class Track:
                 self.over_active = False
 
 class Player:
-    """
-    SSEQ player: 16 hardware channels, 32 tracks, tempo, LCG RNG.
-
-    Args:
-        blob: SSEQ event bytecode.
-        bank: list of BankEntry (instrument definitions).
-        waveArc: list of 4 decoded wave archives (or None).
-        sample_rate: output sample rate in Hz.
-        sseq_vol: SSEQ master volume (0-127).
-        player_prio: channel-allocation priority base from SDAT cpr field.
-        loop_passes: number of times the sequence loop body is played.
-            1 = current/legacy behavior (one iteration, marks on pass 1)
-            2 = steady-state export: tracks follow their backward jump once
-    """
+    """SSEQ player: 16 channels, 32 tracks, tempo, RNG."""
     def __init__(self, blob, bank, waveArc, sample_rate, sseq_vol, player_prio=0, loop_passes=1):
         self.blob = blob
         self.bank = bank
