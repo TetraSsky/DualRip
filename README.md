@@ -53,6 +53,7 @@ dualrip --file game.3ds --list
 | `--rate N` | sample rate (default 44100) |
 | `--only I J...` | only these entry/sound indices |
 | `--bank-map "4=32+33"` | NDS only: override bank resolution |
+| `--boot9 PATH` | 3DS only: path to the console's boot ROM dump (only required for encrypted ROMs) |
 
 GUI: open a `.sdat`/`.nds` or a 3DS `.cia`/`.3ds`/`.bcsar`, browse/filter,
 double-click to preview any sound effect or music track (seek, pause, loop
