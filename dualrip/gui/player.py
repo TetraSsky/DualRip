@@ -1,6 +1,4 @@
-"""
-Playback bar widget (seek slider, loop toggle, Play/Pause/Stop).
-"""
+"""Playback bar widget."""
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QPainter
@@ -28,9 +26,7 @@ class SeekSlider(QSlider):
 
     def set_buffered_fraction(self, frac):
         frac = 0.0 if frac < 0.0 else (1.0 if frac > 1.0 else frac)
-        if abs(frac - self._buffered_frac) > 0.002 or (
-            (frac >= 1.0) != (self._buffered_frac >= 1.0)
-        ):
+        if abs(frac - self._buffered_frac) > 0.002 or ((frac >= 1.0) != (self._buffered_frac >= 1.0)):
             self._buffered_frac = frac
             self.update()
 
@@ -65,6 +61,7 @@ class SeekSlider(QSlider):
         super().mousePressEvent(event)
 
 class PlayerBar(QFrame):
+    """Play/pause/stop bar with a seek slider."""
     play_clicked = Signal() # the main window decides what to (re)render
     loaded_changed = Signal(object) # cache key of loaded track
 
@@ -158,7 +155,7 @@ class PlayerBar(QFrame):
         return True
 
     def begin_stream(self, key, rate):
-        """Arm bar for streaming render. Full-track estimate arrives in ~300ms (sequencer-only), then exact total snaps at finalize."""
+        """Arm the bar for a streaming render."""
         self._set_loaded_key(key)
         self._rate = rate
         self.slider.setRange(0, 0)
@@ -167,7 +164,7 @@ class PlayerBar(QFrame):
         self._poll()
 
     def begin_live(self, key, rate):
-        """Arm bar for live (ring) music render. Whole track seekable from start via checkpoints — no buffered band, drag jumps instantly."""
+        """Arm the bar for a live (ring) music render."""
         self._set_loaded_key(key)
         self._rate = rate
         self.slider.setRange(0, 0)

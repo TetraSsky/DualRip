@@ -1,16 +1,4 @@
-"""
-Audio preview backend (zero Qt imports — decoupled, testable standalone).
-
-Two feed modes:
-  load() — complete int16 stereo buffer (SFX, cached replays).
-  stream_begin/feed/finalize — growing buffer (streaming music render).
-  live_begin/push/end — ring-buffer for live seekable preview.
-
-Single persistent PortAudio OutputStream (sd.play crashes rapid previews on Windows). Callback never touches Qt. sounddevice is optional.
-
-recheck_device() hot-swaps the stream onto the default output device.
-Wired from the GUI to QMediaDevices.audioOutputsChanged.
-"""
+"""Audio preview backend, no Qt imports."""
 
 import threading
 import numpy as np
@@ -45,10 +33,10 @@ class _Player:
         self._armed = False # want to auto-start once primed
         self._prime = 0 # frames to buffer before auto-starting
         self._est_total = 0 # estimated total frames while streaming
-        self._epoch = 0 # bumped on every (re)load; stale-writer guard
+        self._epoch = 0 # bumped on every (re)load, stale-writer guard
         self._state = STOPPED
         self._loop = False
-        self._loop_start = 0 # loop region, in frames (end exclusive);
+        self._loop_start = 0 # loop region in frames, end exclusive
         self._loop_end = 0 # equals (0, filled) when the sound has no marks
         self._underruns = 0 # PortAudio output_underflow reports
         self._live = False
@@ -56,27 +44,18 @@ class _Player:
         self._cpos = None # int64 (R,) content sample index per ring frame
         self._R = 0 # ring capacity in frames
         self._w = 0 # stream write index (monotonic)
-        self._rd = 0 # stream read index (monotonic); valid = [_rd, _w)
+        self._rd = 0 # stream read index (monotonic), valid = [_rd, _w)
         self._cur_content = 0 # content position of the playhead (for the UI)
         self._content_total = 0 # exact total once known, else 0
         self._armed_live = False # auto-start once first block arrives
         self._ended = False # producer reached the natural end (no loop)
-        self._seek_epoch = 0  # bumped on every seek request
-        self._seek_target = None  # pending seek (content frame) for the producer
-        self._cond = threading.Condition(self._lock)  # wakes producer on space/seek
-        self._volume = 1.0  # output gain, 0.0–1.0
+        self._seek_epoch = 0 # bumped on every seek request
+        self._seek_target = None # pending seek (content frame) for the producer
+        self._cond = threading.Condition(self._lock) # wakes producer on space/seek
+        self._volume = 1.0 # output gain, 0.0–1.0
 
     def recheck_device(self, qt_id=None):
-        """
-        Call when the OS default output device changes
-        GUI passes Qt device id as qt_id (= bytes(QMediaDevices.defaultAudioOutput().id())).
-
-        - PortAudio caches the default device internally
-        - terminate/initialize cycle clears it but kills the active stream
-        - audioOutputsChanged can fire repeatedly for the same device, qt_id deduplicates to avoid unnecessary teardown
-
-        Playback state lives outside the stream, so _ensure_stream picks the new device seamlessly on reopen
-        """
+        """Rebind the stream when the default output device changes."""
         if _sd is None:
             return
         with self._stream_lock:
@@ -139,7 +118,7 @@ class _Player:
         except Exception:
             outdata[:] = 0
 
-    # --- live (ring) mode: called under _lock from _callback ---
+    # live (ring) mode, called under _lock from _callback
     def _callback_live(self, outdata, frames):
         if self._state != PLAYING or self._ring is None:
             outdata[:] = 0
@@ -171,7 +150,7 @@ class _Player:
         self._cond.notify()
 
     def live_begin(self, rate, est_total=0, loop_marks=None):
-        """Arm live (ring) playback. A background producer then feeds blocks via live_push() and re-seeds on request_seek(). Returns an epoch token (or None without audio)."""
+        """Arm live (ring) playback, returns an epoch token or None."""
         if _sd is None:
             return None
         with self._lock:
@@ -209,7 +188,7 @@ class _Player:
             return self._epoch
 
     def live_push(self, token, content_start, block):
-        """Append up to the free ring space (producer thread). Returns the number of frames actually written (0 if full or the token is stale)."""
+        """Append into the free ring space, returns frames written."""
         block = np.ascontiguousarray(block, dtype=np.int16)
         m = len(block)
         if m == 0:
@@ -242,7 +221,7 @@ class _Player:
             return take
 
     def live_wait_space(self, token, timeout):
-        """Producer: block until the ring has free space, a seek is pending, or the token goes stale."""
+        """Block until the ring has space, a seek lands, or the token goes stale."""
         with self._lock:
             if token != self._epoch:
                 return False
@@ -254,7 +233,7 @@ class _Player:
             return token == self._epoch
 
     def request_seek(self, frame):
-        """User seek (any thread): jump the playhead; the producer re-seeds the renderer to match. Drops buffered audio so no stale sound plays."""
+        """Jump the playhead and re-seed the producer, dropping buffered audio."""
         with self._lock:
             if not self._live:
                 return
@@ -269,7 +248,7 @@ class _Player:
             self._cond.notify()
 
     def consume_seek(self, token):
-        """Producer: fetch and clear a pending seek target (None if none)."""
+        """Fetch and clear a pending seek target."""
         with self._lock:
             if token != self._epoch:
                 return None
@@ -282,7 +261,7 @@ class _Player:
             return token == self._epoch and self._seek_target is not None
 
     def live_end(self, token):
-        """Producer: no more audio will be pushed (natural end, no loop). The callback drains what remains, then stops."""
+        """Signal the natural end so the callback drains and stops."""
         with self._lock:
             if token != self._epoch:
                 return
@@ -293,7 +272,7 @@ class _Player:
             self._cond.notify()
 
     def live_set_total(self, token, frames, exact=False, loop_marks=None):
-        """Report the track length: a fast estimate for the seek bar, later the exact total (and loop marks) once the racer has run the whole thing."""
+        """Set the known track length and loop marks."""
         with self._lock:
             if token != self._epoch or not self._live:
                 return
@@ -321,7 +300,7 @@ class _Player:
             return self._live
 
     def _ensure_stream(self, rate):
-        """Reopen the stream on rate/device mismatch. Thread-safe via _stream_lock so it never stalls the audio callback."""
+        """Reopen the stream on a rate or device change."""
         try:
             device = _sd.query_devices(kind='output')['index']
         except Exception:
@@ -348,8 +327,15 @@ class _Player:
             self._stream_device = device
             return True
 
+    def warmup(self, rate):
+        """Open the persistent stream ahead of the first playback."""
+        # spends the cold-start dropout on silence, not on the first sound
+        if _sd is None:
+            return
+        self._ensure_stream(int(rate))
+
     def load(self, audio, rate, loop_start=None, loop_end=None):
-        """Load a complete sound (int16 stereo ndarray) without starting playback. loop_start/loop_end are frame indices of the sound's own loop region; looping falls back to the whole buffer when absent."""
+        """Load a complete int16 stereo sound without starting playback."""
         if _sd is None:
             return False
         audio = np.ascontiguousarray(audio, dtype=np.int16)
@@ -383,7 +369,7 @@ class _Player:
         return True
 
     def stream_begin(self, rate, prime_frames):
-        """Arm a growing buffer; playback auto-starts once prime_frames are fed. Returns an epoch token for set_estimated_total (so an estimator of a superseded stream can never touch a newer one), or None if no audio output is available."""
+        """Arm a growing buffer, returns an epoch token or None."""
         if _sd is None:
             return None
         if not self._ensure_stream(rate):
@@ -410,13 +396,13 @@ class _Player:
             return self._epoch
 
     def set_estimated_total(self, token, frames):
-        """Report the sequencer-derived total length (a fast lower bound) so the UI can size its seek bar before the render finishes."""
+        """Set the estimated total length for the seek bar."""
         with self._lock:
             if token == self._epoch and not self._final:
                 self._est_total = int(frames)
 
     def stream_feed(self, chunk):
-        """Append an int16 stereo chunk to the streaming buffer (producer thread only). Auto-starts playback once primed."""
+        """Append a chunk to the streaming buffer."""
         if self._data is None:
             return
         chunk = np.ascontiguousarray(chunk, dtype=np.int16)
@@ -441,7 +427,7 @@ class _Player:
                 self._armed = False
 
     def stream_finalize(self, loop_start=None, loop_end=None):
-        """Mark the streaming render complete: total length and loop points are now known."""
+        """Mark the streaming render complete."""
         with self._lock:
             total = self._filled
             ls = 0 if loop_start is None else int(loop_start)
@@ -475,7 +461,7 @@ class _Player:
                 self._state = PAUSED
 
     def stop(self):
-        """Halt and rewind; the buffer stays loaded."""
+        """Halt and rewind, keeping the buffer loaded."""
         with self._lock:
             if self._live:
                 self._state = STOPPED
@@ -539,14 +525,14 @@ class _Player:
             return self._pos
 
     def duration(self):
-        """Total length in frames: exact once final, otherwise the best known value (estimated total, or the buffered amount until the estimate lands)."""
+        """Total length in frames, exact once final else the best estimate."""
         with self._lock:
             if self._live:
                 return max(self._content_total, self._est_total)
             return self._total_locked()
 
     def buffered(self):
-        """Frames actually rendered and playable so far. In live mode the whole track is seekable (checkpoints), so it reads as fully buffered."""
+        """Frames rendered and playable so far."""
         with self._lock:
             if self._live:
                 return max(self._content_total, self._est_total)
@@ -592,12 +578,16 @@ def recheck_device(qt_id=None):
     """Call when the OS default output device changes."""
     _player.recheck_device(qt_id)
 
+def warmup(rate):
+    """Pre-open the output stream so the first sound doesn't glitch on cold start."""
+    _player.warmup(rate)
+
 def load(audio, rate, loop_start=None, loop_end=None):
     """Load a complete int16 stereo ndarray into the player. Returns success."""
     return _player.load(audio, rate, loop_start, loop_end)
 
 def stream_begin(rate, prime_frames):
-    """Arm a streaming buffer; returns an epoch token (or None w/o audio)."""
+    """Arm a streaming buffer, returns an epoch token or None."""
     return _player.stream_begin(rate, prime_frames)
 
 def set_estimated_total(token, frames):
@@ -609,9 +599,8 @@ def stream_feed(chunk):
 def stream_finalize(loop_start=None, loop_end=None):
     _player.stream_finalize(loop_start, loop_end)
 
-# --- live (ring) mode ------------------------------------------------
 def live_begin(rate, est_total=0, loop_marks=None):
-    """Arm live ring playback; returns an epoch token (or None w/o audio)."""
+    """Arm live ring playback, returns an epoch token or None."""
     return _player.live_begin(rate, est_total, loop_marks)
 
 def live_push(token, content_start, block):

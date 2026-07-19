@@ -1,10 +1,4 @@
-"""
-DualRip main window: SDAT explorer, entry details, audio preview, export.
-
-Supports opening multiple SDATs simultaneously (e.g. from a .nds ROM that
-contains several sound archives).  The tree groups entries by SDAT so the user
-can browse and export across all of them without re-opening the file.
-"""
+"""Main window: archive explorer, details, preview, export."""
 
 import os
 from collections import OrderedDict
@@ -38,14 +32,10 @@ try:
     from PySide6.QtMultimedia import QMediaDevices
 except ImportError:
     QMediaDevices = None
-try:
-    from PySide6.QtMultimedia import QMediaDevices
-except ImportError:
-    QMediaDevices = None
 from .. import __version__
 from ..bankmap import BankResolver, parse_bank_map
-from ..formats.rom import find_sdats_in_rom
-from ..formats.sdat import SdatFile
+from ..formats.ctr import KIND_TITLE, CtrArchive, find_csars_in_rom, open_bcsar
+from ..formats.sdat import SdatFile, find_sdats_in_rom
 from . import audio
 from .dialogs import (
     ExportDialog,
@@ -55,7 +45,7 @@ from .dialogs import (
     save_recent_files,
 )
 from .player import PlayerBar
-from .workers import LiveWorker, StreamWorker
+from .workers import CtrPreviewWorker, LiveWorker, StreamWorker
 
 CACHE_SIZE = 48
 CACHE_MAX_BYTES = 256 * 1024 * 1024
@@ -69,11 +59,13 @@ TREE_COL_ID = 46
 STATUSBAR_MSG_LEFT = 6
 RECENT_MAX = 8
 
-# ROLE_KIND: 'sdat' | 'cat' | 'seqcat' | 'arc' | 'entry' | 'seq' | 'bank' | 'war'
+# NDS: 'sdat' | 'cat' | 'seqcat' | 'arc' | 'entry' | 'seq' | 'bank' | 'war'
+# 3DS: 'csar' | 'carc'| 'centry' | 'cstrmcat' | 'cbank' | 'cwarv'
 ROLE_KIND = Qt.UserRole
 ROLE_ARC = Qt.UserRole + 1
 ROLE_INDEX = Qt.UserRole + 2
 ROLE_SDAT = Qt.UserRole + 3 # sdat_key on every item, identifies owning SdatFile
+ROLE_KFILTER = Qt.UserRole + 4
 
 
 class MainWindow(QMainWindow):
@@ -85,7 +77,7 @@ class MainWindow(QMainWindow):
         self.resize(1060, 680)
         self.setAcceptDrops(True)
 
-        # _sdats: OrderedDict[sdat_key, (label, SdatFile)]
+        # _sdats: OrderedDict[key, (label, SdatFile | CtrArchive)]
         self._sdats = OrderedDict()
         self._sdat_path = None # display label for title bar / status
         self.settings = load_settings()
@@ -106,6 +98,9 @@ class MainWindow(QMainWindow):
             self._media_devices = QMediaDevices(self)
             self._media_devices.audioOutputsChanged.connect(self._on_audio_outputs_changed)
 
+        if audio.available():
+            audio.warmup(self.settings['rate'])
+
     def _on_audio_outputs_changed(self):
         dev = self._media_devices.defaultAudioOutput()
         audio.recheck_device(None if dev.isNull() else bytes(dev.id()))
@@ -124,7 +119,7 @@ class MainWindow(QMainWindow):
 
     def _build_menu(self):
         m_file = self.menuBar().addMenu('&File')
-        act_open = QAction('&Open SDAT/NDS...', self)
+        act_open = QAction('&Open File...', self)
         act_open.setShortcut(QKeySequence.Open)
         act_open.triggered.connect(self.open_sdat)
         m_file.addAction(act_open)
@@ -194,8 +189,8 @@ class MainWindow(QMainWindow):
         self.tree.installEventFilter(self)
 
         self.empty_placeholder = QLabel(
-            'Open a sound_data.sdat or .nds ROM to get started\n'
-            '(File > Open SDAT/NDS..., Ctrl+O or drag & drop a file)'
+            'Open a .sdat, .nds NDS ROM | .bcsar, .cia/.3ds 3DS ROM to get started\n'
+            '(File > Open File, Ctrl+O or drag & drop a file)'
         )
         self.empty_placeholder.setAlignment(Qt.AlignCenter)
         self.empty_placeholder.setWordWrap(True)
@@ -251,10 +246,9 @@ class MainWindow(QMainWindow):
         rv.addStretch(1)
 
         note = QLabel(
-            'Raw export: steady-state loop (2 passes), native silences, full '
-            'releases.\nLoop points go to manifest.csv and into a '
-            'smpl chunk in the WAV.\nCtrl/Shift-click to select several '
-            'sound effects, archives or music sequences.'
+            'Raw export: steady-state loop (2 passes), native silences, full releases.\n'
+            'Loop points go to manifest.csv and into a  smpl chunk in the WAV.\n'
+            'Ctrl/Shift-click to select several sound effects, archives or music sequences.'
         )
         note.setWordWrap(True)
         note.setForegroundRole(QPalette.PlaceholderText)
@@ -316,20 +310,27 @@ class MainWindow(QMainWindow):
 
     def open_sdat(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, 'Open SDAT or NDS ROM', '',
-            'Audio files (*.sdat *.nds);;SDAT files (*.sdat);;NDS ROMs (*.nds);;All files (*)'
+            self, 'Open SDAT, NDS ROM or 3DS ROM', '',
+            'Audio files (*.sdat *.nds *.cia *.3ds *.bcsar);;'
+            'SDAT files (*.sdat);;NDS ROMs (*.nds);;'
+            '3DS ROMs (*.cia *.3ds);;CSAR archives (*.bcsar);;All files (*)'
         )
         if not path:
             return
         self._open_path(path)
 
-    def _open_path(self, path, nds_preset=None):
-        """Open a .sdat or .nds by path, nds_preset preselects SDAT indices when reopening a multi-SDAT ROM from Recent (skips picker dialog)."""
+    def _open_path(self, path, preset=None):
+        """Open a .sdat/.nds/.cia/.3ds/.bcsar by path."""
         try:
             QApplication.setOverrideCursor(Qt.WaitCursor)
             self._cancel_preview()
-            if path.lower().endswith('.nds'):
-                self._open_nds(path, preset=nds_preset)
+            low = path.lower()
+            if low.endswith('.nds'):
+                self._open_nds(path, preset=preset)
+            elif low.endswith(('.cia', '.3ds')):
+                self._open_ctr_rom(path, preset=preset)
+            elif low.endswith('.bcsar'):
+                self._open_bcsar_file(path)
             else:
                 self._open_sdat_file(path)
         except Exception as exc:
@@ -378,7 +379,7 @@ class MainWindow(QMainWindow):
                        if os.path.normcase(e['path']) != os.path.normcase(entry['path'])]
             save_recent_files(entries)
             return
-        self._open_path(entry['path'], nds_preset=entry.get('sdats'))
+        self._open_path(entry['path'], preset=entry.get('sdats'))
 
     # -- drag & drop -----------------------------------------------------------
 
@@ -390,7 +391,7 @@ class MainWindow(QMainWindow):
         if len(urls) != 1 or not urls[0].isLocalFile():
             return None
         path = urls[0].toLocalFile()
-        if path.lower().endswith(('.sdat', '.nds')):
+        if path.lower().endswith(('.sdat', '.nds', '.cia', '.3ds', '.bcsar')):
             return path
         return None
 
@@ -423,7 +424,7 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, lambda: self._open_path(path))
 
     def _open_sdat_file(self, path):
-        """Open a plain .sdat file — single SDAT, key='0'."""
+        """Open a plain .sdat file."""
         self._clear_all()
         sdat = SdatFile(path)
         self._sdats['0'] = (os.path.basename(path), sdat)
@@ -433,11 +434,7 @@ class MainWindow(QMainWindow):
         self._remember_recent(path, None)
 
     def _open_nds(self, path, preset=None):
-        """
-        Open a .nds ROM: extract SDAT(s), allow multi-select.
-
-        preset: SDAT indices remembered by the Recent menu.
-        """
+        """Open a .nds ROM and extract its SDAT(s)."""
         sdats = find_sdats_in_rom(path)
         chosen = None
         if preset:
@@ -463,6 +460,39 @@ class MainWindow(QMainWindow):
         self._fill_tree()
         self._remember_recent(path, [s['index'] for s in chosen])
 
+    def _open_ctr_rom(self, path, preset=None):
+        """Open a .cia/.3ds ROM and extract its CSAR archive(s)."""
+        archives = find_csars_in_rom(path, boot9=load_settings()['boot9'] or None)
+        chosen = None
+        if preset:
+            chosen = [a for i, a in enumerate(archives) if i in set(preset)] or None
+        if chosen is None:
+            if len(archives) == 1:
+                chosen = archives
+            else:
+                QApplication.restoreOverrideCursor()
+                chosen = self._pick_csars_from_rom(path, archives)
+                QApplication.setOverrideCursor(Qt.WaitCursor)
+                if not chosen:
+                    raise ValueError('No CSAR selected.')
+        self._clear_all()
+        for i, arch in enumerate(chosen):
+            self._sdats[str(i)] = (arch.label, arch)
+        self._sdat_path = path
+        self._generation += 1
+        self._fill_tree()
+        self._remember_recent(path, [archives.index(a) for a in chosen])
+
+    def _open_bcsar_file(self, path):
+        """Open a loose .bcsar."""
+        arch = open_bcsar(path)
+        self._clear_all()
+        self._sdats['0'] = (arch.label, arch)
+        self._sdat_path = path
+        self._generation += 1
+        self._fill_tree()
+        self._remember_recent(path, None)
+
     def _clear_all(self):
         self._sdats.clear()
         self._resolvers.clear()
@@ -484,7 +514,7 @@ class MainWindow(QMainWindow):
         self.player.setVisible(False)
 
     def _pick_sdats_from_rom(self, rom_path, sdats):
-        """Show a dialog listing all SDATs — allow multi-selection (Ctrl/Shift-click)."""
+        """Show a dialog listing all SDATs for multi-selection."""
         dlg = QDialog(self)
         dlg.setWindowTitle(f'Select SDAT(s) — {os.path.basename(rom_path)}')
         dlg.resize(680, 440)
@@ -494,13 +524,37 @@ class MainWindow(QMainWindow):
         lst.setSelectionMode(QAbstractItemView.ExtendedSelection)
         for s in sdats:
             size_kb = s['size'] / 1024
-            text = (
-                f'SDAT #{s["index"]:>3d}  —  {size_kb:>6.0f} KB  |  '
-                f'{s["seqarcs"]:>2d} SSAR, {s["sseqs"]:>2d} SSEQ, '
-                f'{s["banks"]:>2d} banks, {s["swars"]:>2d} SWAR'
-            )
+            text = (f'SDAT #{s["index"]:>3d}  —  {size_kb:>6.0f} KB  |  {s["seqarcs"]:>2d} SSAR, {s["sseqs"]:>2d} SSEQ, {s["banks"]:>2d} banks, {s["swars"]:>2d} SWAR')
             item = QListWidgetItem(text)
             item.setData(Qt.UserRole, s)
+            lst.addItem(item)
+        lst.setCurrentRow(0)
+        lst.itemDoubleClicked.connect(dlg.accept)
+        layout.addWidget(lst)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+        if dlg.exec() != QDialog.Accepted:
+            return None
+        return [lst.item(i).data(Qt.UserRole)
+            for i in range(lst.count())
+            if lst.item(i).isSelected()]
+
+    def _pick_csars_from_rom(self, rom_path, archives):
+        """Show a dialog listing all CSAR sound archives."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f'Select CSAR(s) — {os.path.basename(rom_path)}')
+        dlg.resize(680, 440)
+        layout = QVBoxLayout(dlg)
+        layout.addWidget(QLabel(f'This ROM contains <b>{len(archives)} CSAR sound archives</b>.<br>Select one or more (Ctrl/Shift-click) to open:'))
+        lst = QListWidget(dlg)
+        lst.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        for i, arch in enumerate(archives):
+            c = arch.counts()
+            text = (f'#{i:>3d}  {arch.label}  |  {c["seq"]:>4d} CSEQ, {c["wsd"]:>3d} CWSD, {c["strm"]:>3d} BCSTM, {len(arch.csar.banks):>3d} CBNK, {len(arch.csar.wars):>3d} CWAR')
+            item = QListWidgetItem(text)
+            item.setData(Qt.UserRole, arch)
             lst.addItem(item)
         lst.setCurrentRow(0)
         lst.itemDoubleClicked.connect(dlg.accept)
@@ -534,6 +588,9 @@ class MainWindow(QMainWindow):
         single = len(self._sdats) == 1
 
         for sdat_key, (label, sdat) in self._sdats.items():
+            if isinstance(sdat, CtrArchive):
+                self._fill_tree_ctr(sdat_key, label, sdat, single)
+                continue
             n_arcs = len(sdat.seqarc_list)
             n_sseq = len(sdat.sequence_list)
             n_banks = sdat.num_banks
@@ -635,6 +692,113 @@ class MainWindow(QMainWindow):
             if single:
                 sdat_root.setExpanded(True)
 
+    def _fill_tree_ctr(self, sdat_key, label, arch, single):
+        """3DS CSAR tree, laid out like the DS SDAT tree."""
+        root = QTreeWidgetItem([label, '', ''])
+        root.setData(0, ROLE_KIND, 'csar')
+        root.setData(0, ROLE_SDAT, sdat_key)
+        root.setFlags(root.flags() & ~Qt.ItemIsSelectable)
+
+        def add_centry(parent, folder, s, info=''):
+            it = QTreeWidgetItem([s.name, str(s.index), info])
+            it.setData(0, ROLE_KIND, 'centry')
+            it.setData(0, ROLE_ARC, folder)
+            it.setData(0, ROLE_INDEX, s.index)
+            it.setData(0, ROLE_SDAT, sdat_key)
+            self._item_index[(sdat_key, 'ctr', s.index)] = it
+            parent.addChild(it)
+
+        def bank_info(s):
+            """Info text for a CSEQ's bank references."""
+            banks = [b for b in s.bank_ids if b != 0xFFFFFF]
+            if not banks:
+                return ''
+            if len(banks) == 1:
+                return f'bank {banks[0]}'
+            return 'banks ' + ', '.join(str(b) for b in banks)
+
+        def add_kind_category(title, kfilter):
+            """Sequence Sounds / Wave Sounds: 'carc' sub-folders per sound
+            set, restricted to sounds of one kind (mirrors SSAR)."""
+            groups = [(folder, [s for s in members if s.kind == kfilter])
+                      for folder, members in arch.folders.items() if folder != 'STRM']
+            groups = [(f, m) for f, m in groups if m]
+            # blank category header
+            cat = QTreeWidgetItem([title, '', ''])
+            cat.setData(0, ROLE_KIND, 'cat')
+            cat.setData(0, ROLE_SDAT, sdat_key)
+            for folder, members in groups:
+                top = QTreeWidgetItem([folder, '', f'{len(members)} entries'])
+                top.setData(0, ROLE_KIND, 'carc')
+                top.setData(0, ROLE_ARC, folder)
+                top.setData(0, ROLE_KFILTER, kfilter)
+                top.setData(0, ROLE_SDAT, sdat_key)
+                for s in members:
+                    add_centry(top, folder, s, bank_info(s) if kfilter == 'sequence' else '')
+                cat.addChild(top)
+            root.addChild(cat)
+            return len(groups)
+
+        n_seq_sets = add_kind_category('Sequence Sounds (CSEQ)', 'sequence')
+        n_wsd_sets = add_kind_category('Wave Sounds (CWSD)', 'wave')
+
+        streams = arch.folders.get('STRM', [])
+        cat_strm = QTreeWidgetItem(['Streams (BCSTM)', '', f'{len(streams)}'])
+        cat_strm.setData(0, ROLE_KIND, 'cstrmcat')
+        cat_strm.setData(0, ROLE_ARC, 'STRM')
+        cat_strm.setData(0, ROLE_SDAT, sdat_key)
+        for s in streams:
+            add_centry(cat_strm, 'STRM', s)
+        root.addChild(cat_strm)
+
+        def war_info(i):
+            """Wave count for a CWAR, blank when unresolved."""
+            try:
+                return f'{arch.war_wave_count(i)} waves'
+            except (LookupError, ValueError):
+                return ''
+
+        def bank_info_wars(i):
+            """Info text for a bank's wave archives."""
+            try:
+                wars = arch.bank_wave_archives(i)
+            except (LookupError, ValueError):
+                return ''
+            if not wars:
+                return ''
+            return 'wave archive , '.join(str(w) for w in wars)
+
+        banks = arch.csar.banks
+        cat_bank = QTreeWidgetItem(['Banks (CBNK)', '', f'{len(banks)}'])
+        cat_bank.setData(0, ROLE_KIND, 'cat')
+        cat_bank.setData(0, ROLE_SDAT, sdat_key)
+        for i, (_file_id, name) in enumerate(banks):
+            it = QTreeWidgetItem([name or f'BANK_{i}', str(i), bank_info_wars(i)])
+            it.setData(0, ROLE_KIND, 'cbank')
+            it.setData(0, ROLE_INDEX, i)
+            it.setData(0, ROLE_SDAT, sdat_key)
+            cat_bank.addChild(it)
+        root.addChild(cat_bank)
+
+        wars = arch.csar.wars
+        cat_war = QTreeWidgetItem(['Wave Archives (CWAR)', '', f'{len(wars)}'])
+        cat_war.setData(0, ROLE_KIND, 'cat')
+        cat_war.setData(0, ROLE_SDAT, sdat_key)
+        for i, _file_id in enumerate(wars):
+            it = QTreeWidgetItem([f'WAR_{i:03d}', str(i), war_info(i)])
+            it.setData(0, ROLE_KIND, 'cwarv')
+            it.setData(0, ROLE_INDEX, i)
+            it.setData(0, ROLE_SDAT, sdat_key)
+            cat_war.addChild(it)
+        root.addChild(cat_war)
+
+        c = arch.counts()
+        root.setText(2, (f'{n_seq_sets} CSEQ, {c["seq"]} entries, {c["strm"]} BCSTM, {len(banks)} CBNK, {len(wars)} CWAR, {n_wsd_sets} CWSD, {c["wsd"]} entries'))
+
+        self.tree.addTopLevelItem(root)
+        if single:
+            root.setExpanded(True) 
+
     def _update_status_and_title(self):
         if not self._sdats:
             return
@@ -642,10 +806,16 @@ class MainWindow(QMainWindow):
         total_sseq = 0
         n_sdats = len(self._sdats)
         for _label, sdat in self._sdats.values():
+            if isinstance(sdat, CtrArchive):
+                total_entries += len(sdat.sounds)
+                continue
             total_entries += sum(c for _i, _n, c in sdat.seqarc_list)
             total_sseq += len(sdat.sequence_list)
         base = os.path.basename(self._sdat_path or '')
-        if n_sdats == 1:
+        all_ctr = all(isinstance(o, CtrArchive) for _l, o in self._sdats.values())
+        if all_ctr:
+            self.statusBar().showMessage(f'{base} - {total_entries} sounds.')
+        elif n_sdats == 1:
             self.statusBar().showMessage(
                 f'{base} - {total_entries} entries, {total_sseq} music sequences.'
             )
@@ -708,7 +878,7 @@ class MainWindow(QMainWindow):
         return it.data(0, ROLE_SDAT)
 
     def _current_playable(self):
-        """Return (sdat, sdat_key, seqarc, entry) for current item if renderable, else (None, None, None, None)."""
+        """(sdat, sdat_key, seqarc, entry) for the current item, or Nones."""
         it = self.tree.currentItem()
         if it is None or not self._sdats:
             return None, None, None, None
@@ -724,13 +894,35 @@ class MainWindow(QMainWindow):
             return sdat, self._sdat_key_for(it), seqarc, seqarc.entries[0]
         return None, None, None, None
 
+    def _current_ctr_sound(self):
+        """(archive, sdat_key, sound) for the current 3DS item, or Nones."""
+        it = self.tree.currentItem()
+        if it is None or not self._sdats or it.data(0, ROLE_KIND) != 'centry':
+            return None, None, None
+        sk = self._sdat_key_for(it)
+        arch = self._sdats[sk][1]
+        return arch, sk, arch.sound(it.data(0, ROLE_INDEX))
+
+    def _ctr_cache_key(self, sk, sound):
+        return (self._generation, sk, 'ctr', sound.index, self.settings['rate'])
+
+    def _current_key(self):
+        """Cache key of the currently selected playable item (DS or 3DS), or None"""
+        _sd, sk, seqarc, entry = self._current_playable()
+        if entry is not None:
+            return self._cache_key(sk, seqarc, entry)
+        _arch, sk, sound = self._current_ctr_sound()
+        if sound is not None:
+            return self._ctr_cache_key(sk, sound)
+        return None
+
     def _selection_changed(self, *_):
         it = self.tree.currentItem()
         if it is None or not self._sdats:
             return
         sdat = self._sdat_for(it)
         kind = it.data(0, ROLE_KIND)
-        self.player.setVisible(kind in ('entry', 'seq'))
+        self.player.setVisible(kind in ('entry', 'seq', 'centry'))
         for lbl in (
             self.lbl_bank,
             self.lbl_volume,
@@ -758,6 +950,44 @@ class MainWindow(QMainWindow):
             self.lbl_bank.setText(bank)
             self.lbl_volume.setText(str(entry.volume))
             self._show_render(self._cache.get(self._cache_key(sk, seqarc, entry)))
+        elif kind == 'centry':
+            arch, sk, sound = self._current_ctr_sound()
+            kl = arch.kind_label(sound)
+            self.lbl_name.setText(sound.name)
+            self.lbl_kind.setText(KIND_TITLE[kl])
+            parent = it.parent()
+            folder = parent.text(0) if parent is not None else ''
+            self.lbl_where.setText(f'{folder}  [{sound.index}]')
+            if kl == 'seq' and sound.bank_ids:
+                shown = ', '.join(str(b) for b in sound.bank_ids if b != 0xFFFFFF)
+                self.lbl_bank.setText(shown or '-')
+            self.lbl_volume.setText(str(sound.volume))
+            self._show_render(self._cache.get(self._ctr_cache_key(sk, sound)))
+        elif kind == 'carc':
+            self.lbl_name.setText(it.text(0))
+            self.lbl_kind.setText('Sound set (CSAR sound set, SSAR analog)')
+            self.lbl_where.setText(f'sound set {it.text(0)}')
+            self.lbl_status.setText(it.text(2))
+        elif kind == 'cstrmcat':
+            self.lbl_name.setText('Streams (BCSTM)')
+            self.lbl_kind.setText('Stream collection')
+            self.lbl_where.setText(f'{it.text(2)} streams')
+            if sdat is not None:
+                sk = self._sdat_key_for(it)
+                lbl = self._sdats[sk][0] if sk in self._sdats else ''
+                self.lbl_status.setText(f'from {lbl}' if lbl else 'select to export all streams')
+        elif kind == 'cbank':
+            self.lbl_name.setText(it.text(0))
+            self.lbl_kind.setText('Instrument bank (CBNK)')
+            self.lbl_where.setText(f'bank {it.text(1)}')
+        elif kind == 'cwarv':
+            self.lbl_name.setText(it.text(0))
+            self.lbl_kind.setText('Wave archive (CWAR)')
+            self.lbl_where.setText(f'wave archive {it.text(1)}')
+        elif kind == 'csar':
+            self.lbl_name.setText(it.text(0))
+            self.lbl_kind.setText('CSAR container (3DS)')
+            self.lbl_where.setText(it.text(2))
         elif kind == 'arc':
             if sdat is not None:
                 arc_id = it.data(0, ROLE_ARC)
@@ -881,11 +1111,7 @@ class MainWindow(QMainWindow):
         super().keyPressEvent(event)
 
     def _on_loaded_changed(self, key):
-        """
-        Player's loaded track changed: bold the matching tree row.
-
-        key is a cache key (generation, sdat_key, arc_id, entry_index, rate) or None.
-        """
+        """Bold the tree row matching the player's loaded track."""
         item = None if key is None else self._item_index.get(tuple(key[1:4]))
         self._set_playing_item(item)
 
@@ -917,10 +1143,10 @@ class MainWindow(QMainWindow):
             self._on_play_clicked()
 
     def _on_play_clicked(self):
-        sdat, sk, seqarc, entry = self._current_playable()
-        if entry is None or sdat is None:
+        key = self._current_key()
+        if key is None:
             return
-        same = self.player.loaded_key == self._cache_key(sk, seqarc, entry)
+        same = self.player.loaded_key == key
         if same and audio.is_live():
             st = audio.state()
             if st == audio.PLAYING:
@@ -936,6 +1162,10 @@ class MainWindow(QMainWindow):
         self.play_selected()
 
     def play_selected(self):
+        arch, csk, sound = self._current_ctr_sound()
+        if sound is not None:
+            self._play_ctr(arch, csk, sound)
+            return
         sdat, sk, seqarc, entry = self._current_playable()
         if entry is None or sdat is None:
             return
@@ -956,10 +1186,7 @@ class MainWindow(QMainWindow):
             if cached.audio is not None:
                 self._play(key, cached)
             else:
-                self.statusBar().showMessage(
-                    f'{cached.name}: {cached.status}'
-                    + (f'({cached.error})' if cached.error else '')
-                )
+                self.statusBar().showMessage(f'{cached.name}: {cached.status} ({cached.error})' if cached.error else '')
             return
         self._cancel_preview()
         audio.unload()
@@ -971,6 +1198,45 @@ class MainWindow(QMainWindow):
         self._preview_key = key
         self.player.begin_stream(key, self.settings['rate'])
         worker.start()
+
+    def _play_ctr(self, archive, sk, sound):
+        """Play a 3DS CSAR sound: cached render or full render in a worker."""
+        key = self._ctr_cache_key(sk, sound)
+        cached = self._cache.get(key)
+        if cached is not None:
+            self._cancel_preview()
+            self._show_render(cached)
+            if cached.audio is not None and len(cached.audio):
+                self._play(key, cached)
+            else:
+                self.statusBar().showMessage(f'{cached.name}: {cached.status} ({cached.error})' if cached.error else '')
+            return
+        self._cancel_preview()
+        audio.unload()
+        self._show_render_progress(sound.name)
+        worker = CtrPreviewWorker(key, archive, sound, self.settings['rate'])
+        worker.done.connect(self._ctr_preview_done)
+        worker.failed.connect(self._preview_failed)
+        self._preview_worker = worker
+        self._preview_key = key
+        worker.start()
+
+    def _ctr_preview_done(self, key, res):
+        if key != self._preview_key:
+            return
+        self._hide_render_progress()
+        self._finish_preview_worker()
+        self._preview_key = None
+        self._cache[key] = res
+        self._cache.move_to_end(key)
+        self._evict_cache()
+        if self._current_key() == key:
+            self._show_render(res)
+        if res.audio is not None and len(res.audio):
+            self._play(key, res)
+        else:
+            self.player.clear()
+            self.statusBar().showMessage(f'{res.name}: {res.status} ({res.error})' if res.error else '')
 
     def _play_music_live(self, sdat, sk, key, seqarc, entry):
         """Start seamless live music preview (LiveWorker)."""
@@ -999,7 +1265,7 @@ class MainWindow(QMainWindow):
             if res.status in ('ok', 'loop'):
                 self.statusBar().showMessage(f'{res.name}: {res.duration:.2f}s')
             else:
-                self.statusBar().showMessage(f'{res.name}: {res.status}' + (f'({res.error})' if res.error else ''))
+                self.statusBar().showMessage(f'{res.name}: {res.status} ({res.error})' if res.error else '')
 
     def _cancel_preview(self):
         self._hide_render_progress()
@@ -1015,7 +1281,8 @@ class MainWindow(QMainWindow):
             worker.wait()
 
     def _play(self, key, res):
-        if self.player.load_result(key, res, self.settings['rate']):
+        # 3DS streams carry their native rate, DS renders use the settings rate
+        if self.player.load_result(key, res, res.rate or self.settings['rate']):
             self.statusBar().showMessage(f'{res.name}: {res.duration:.2f}s')
             return True
         self.statusBar().showMessage('Playback unavailable (sounddevice missing or no audio output device).')
@@ -1063,10 +1330,7 @@ class MainWindow(QMainWindow):
     # -- export --------------------------------------------------------------
 
     def _selected_jobs(self):
-        """
-        Build tagged jobs [(sdat_key, kind, ident, sel)] from tree selection.
-        Each job belongs to the SDAT identified by sdat_key.
-        """
+        """Build tagged jobs from the tree selection."""
         per_sdat = {}
         for it in self.tree.selectedItems():
             sk = self._sdat_key_for(it)
@@ -1076,9 +1340,15 @@ class MainWindow(QMainWindow):
                 per_sdat[sk] = {'whole': set(), 'partial': {}, 'seq': set(), 'all_seqs': False}
             p = per_sdat[sk]
             kind = it.data(0, ROLE_KIND)
-            if kind == 'arc':
+            if kind == 'arc' or kind == 'cstrmcat':
                 p['whole'].add(it.data(0, ROLE_ARC))
-            elif kind == 'entry':
+            elif kind == 'carc':
+                arc = it.data(0, ROLE_ARC)
+                sdat = self._sdats[sk][1]
+                kfilter = it.data(0, ROLE_KFILTER)
+                idxs = {s.index for s in sdat.folders[arc] if s.kind == kfilter}
+                p['partial'].setdefault(arc, set()).update(idxs)
+            elif kind in ('entry', 'centry'):
                 arc = it.data(0, ROLE_ARC)
                 p['partial'].setdefault(arc, set()).add(it.data(0, ROLE_INDEX))
             elif kind == 'seq':
@@ -1087,11 +1357,13 @@ class MainWindow(QMainWindow):
                 p['all_seqs'] = True
         jobs = []
         for sk, p in per_sdat.items():
+            # 3DS folders are keyed by name, DS archives by id
+            arc_kind = 'carc' if isinstance(self._sdats[sk][1], CtrArchive) else 'arc'
             for a in sorted(p['whole']):
-                jobs.append((sk, 'arc', a, None))
+                jobs.append((sk, arc_kind, a, None))
             for a, idxs in sorted(p['partial'].items()):
                 if a not in p['whole']:
-                    jobs.append((sk, 'arc', a, idxs))
+                    jobs.append((sk, arc_kind, a, idxs))
             if p['all_seqs']:
                 jobs.append((sk, 'seq', None, None))
             elif p['seq']:
@@ -1111,6 +1383,10 @@ class MainWindow(QMainWindow):
     def export_all(self):
         jobs = []
         for sk, (_label, sdat) in self._sdats.items():
+            if isinstance(sdat, CtrArchive):
+                for folder in sdat.folders:
+                    jobs.append((sk, 'carc', folder, None))
+                continue
             for i, _n, _c in sdat.seqarc_list:
                 jobs.append((sk, 'arc', i, None))
             if sdat.sequence_list:
@@ -1141,7 +1417,8 @@ class MainWindow(QMainWindow):
         QMessageBox.about(
             self,'About DualRip',
             f'<b>DualRip {__version__}</b><br>'
-            'Nintendo DS SDAT sound-effect (SSAR) and music (SSEQ) ripper.<br><br>'
+            'Nintendo DS SDAT sound-effect (SSAR) and music (SSEQ) ripper,<br>'
+            'and Nintendo 3DS CSAR ripper (CSEQ sequences, CWSD wave sounds, BCSTM streams).<br><br>'
             'Playback core is a Python port of the FeOS Sound System (fincs), as adapted by Naram Qashat (CyberBotX) for the NCSF player (in_xsf). Driver tables originate from disassembly of Nintendo\'s NNS sound driver by those authors.',
         )
 

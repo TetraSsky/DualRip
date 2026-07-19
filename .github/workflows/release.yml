@@ -48,12 +48,13 @@ jobs:
           body: |
             ## DualRip ${{ github.ref_name }}
 
-            - Rips every SSAR entry & SSEQ music sequence to WAV (CLI + GUI).
-            - Accepts `.sdat` files or `.nds` ROMs directly — SDATs are extracted automatically.
-            - For ROMs with multiple SDATs, pick several at once in the import dialog.
+            - Rips Nintendo DS (SSAR sound effects + SSEQ music) and Nintendo 3DS (CSAR sequence sounds, wave sounds and streams) audio to WAV (CLI + GUI).
+            - DS: accepts `.sdat` files or `.nds` ROMs. 3DS: accepts `.cia`/`.3ds` ROMs or a loose `.bcsar`.
+            - Decrypted 3DS images open with no setup; encrypted ones need a console boot ROM dump (`boot9.bin`) set in Settings (GUI) or `--boot9` (CLI).
+            - For files holding several archives, pick several at once in the import dialog.
             - Raw export: steady-state loop (2 passes) for looping sequences, native rests kept, full release envelopes; loop points in manifest.csv and embedded in the WAV as a smpl chunk.
             - NULL/dynamic bank slots resolved automatically per entry (--bank-map to override).
-            - GUI: SDAT browser with filter and per-SDAT grouping, preview player (seek / pause / loop on the sound's own loop points), multi-select batch export with a live log.
+            - GUI: archive browser with filter and grouping, preview player (seek / pause / loop on the sound's own loop points), multi-select batch export with a live log.
 
             Pre-built binaries attached below: Windows (`DualRip.exe`), Linux x86_64 (`DualRip-linux`), macOS Apple Silicon (`DualRip-macos-arm64`) and macOS Intel (`DualRip-macos-x86_64`). Python users: `pip install -e .[gui]`.
             **Linux/macOS**: the download has no execute bit set — run `chmod +x DualRip-*` first.

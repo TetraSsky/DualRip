@@ -1,6 +1,4 @@
-"""
-DualRip GUI entry point.
-"""
+"""GUI entry point."""
 
 import os
 import sys

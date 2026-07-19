@@ -5,12 +5,13 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "dualrip"
 dynamic = ["version"]
-description = "Nintendo DS SDAT sound-effect (SSAR) ripper - raw WAV export with loop points"
+description = "Nintendo DS SDAT and 3DS CSAR sound ripper - raw WAV export with loop points"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "numpy",
     "ndspy",
+    "pyctr",
 ]
 
 [project.optional-dependencies]

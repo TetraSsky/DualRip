@@ -13,3 +13,4 @@ jobs:
       - run: pytest tests/test_golden.py -v
         env:
           DUALRIP_TEST_SDAT: ${{ secrets.DUALRIP_TEST_SDAT }}
+          DUALRIP_TEST_CTR: ${{ secrets.DUALRIP_TEST_CTR }}

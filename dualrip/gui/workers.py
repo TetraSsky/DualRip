@@ -1,22 +1,23 @@
-"""
-Background workers (plain Python threads, signals > GUI via Qt queued delivery).
-
-CRITICAL: signal connections MUST be bound methods of a GUI-thread QObject (never lambdas). Lambdas can execute in the worker thread and corrupt Qt's heap.
-Keep a Python ref until the terminal signal, then wait() before dropping.
-"""
+"""Background worker threads that emit Qt signals to the GUI."""
 
 import threading
 import time
 import numpy as np
 from PySide6.QtCore import QObject, Signal
-from ..engine.render import LiveRenderer, render_entry_stream
-from ..export import RenderResult, rip_archive, rip_sequences
+from ..engine.sdat.render import LiveRenderer, render_entry_stream
+from ..export import (
+    RenderResult,
+    render_ctr_one,
+    rip_archive,
+    rip_ctr_folder,
+    rip_sequences,
+)
 from . import audio
 
-# --- streaming preview pacing ---
+# streaming preview pacing
 PRIME_SECONDS = 0.3 # buffer before playback auto-starts
 PACE_SLEEP = 0.03 # per-chunk GIL yield once playing (~5× realtime, no crackle)
-# Skipped during priming or when playhead > buffered > render at full speed.
+# skipped during priming or when the playhead outruns the buffer, to render at full speed
 
 
 class _ThreadWorker(QObject):
@@ -28,7 +29,7 @@ class _ThreadWorker(QObject):
         self._thread.start()
 
     def wait(self):
-        """Join the worker thread. Called from the terminal-signal handler, where the thread is already past its last emit, so this returns almost immediately."""
+        """Join the worker thread."""
         if self._thread.is_alive():
             self._thread.join()
 
@@ -42,12 +43,7 @@ class _ThreadWorker(QObject):
         raise NotImplementedError
 
 class StreamWorker(_ThreadWorker):
-    """
-    Incremental render > audio stream + accumulate for cache.
-
-    done(key, RenderResult) on completion; failed(key, msg) on error.
-    cancel() stops early (superseded) — no signal, audio left for caller.
-    """
+    """Incremental render feeding the audio stream, accumulating for cache."""
 
     done = Signal(object, object) # request key, RenderResult
     failed = Signal(object, str) # request key, error message
@@ -70,7 +66,7 @@ class StreamWorker(_ThreadWorker):
             time.sleep(PACE_SLEEP)
 
     def _start_racer(self, token, blob, offset, bank, waveArc, entry_volume, player_prio):
-        """State-only LiveRenderer fast-forward > exact total before the streaming render produces much audio (~50-500× faster, no numpy synthesis)."""
+        """Fast-forward state-only to the exact total."""
 
         def run():
             r = LiveRenderer(blob, offset, bank, waveArc, entry_volume, self._rate, player_prio=player_prio, loop_passes=2)
@@ -131,8 +127,8 @@ class StreamWorker(_ThreadWorker):
             res = RenderResult(entry.index, entry.name, 'loop' if looped else 'ok', label, len(full) / self._rate, ls, le, full)
         self._emit(self.done, key, res)
 
-# --- live (music) preview pacing ---
-CHECKPOINT_SECONDS = 4.0 # snapshot interval; seek > ffwd <= 4s (~15ms) > instant
+# live (music) preview pacing
+CHECKPOINT_SECONDS = 4.0 # snapshot interval, so a seek is at most a 4s ffwd
 RACE_STEP_FRAMES = 8820 # racer step size (~0.2s), yields GIL between
 RACE_YIELD = 0.0005 # racer GIL yield per step
 PRODUCE_CHUNK_FRAMES = 1024 # audio push size (small > frequent GIL handoff)
@@ -140,7 +136,7 @@ PRODUCE_YIELD = 0.001 # producer GIL yield per push
 LIVE_PRIME_SECONDS = 0.08 # mirrors audio.live_push prime
 
 class _Checkpoints:
-    """Thread-safe LiveRenderer snapshots, sorted by emitted. nearest(target) returns the last snapshot <= target > minimal ffwd."""
+    """Thread-safe LiveRenderer snapshots sorted by emitted frame."""
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -161,15 +157,7 @@ class _Checkpoints:
             return best
 
 class LiveWorker(_ThreadWorker):
-    """
-    Seamless music: on-demand synthesis > ring buffer, instant seek.
-
-    Racer runs state-only (~150× realtime), snapshots every CHECKPOINT_SECONDS. Seek > nearest snapshot + ffwd (~15ms, bit-exact).
-    No full-song buffer kept.
-
-    meta(key, RenderResult with audio=None) on exact length/loops known.
-    failed(key, msg) on error. cancel() + wait() to clean up.
-    """
+    """Seamless music: on-demand synthesis into a ring buffer with instant seek."""
 
     meta = Signal(object, object) # request key, RenderResult (audio=None)
     failed = Signal(object, str) # request key, error message
@@ -195,14 +183,14 @@ class LiveWorker(_ThreadWorker):
         return LiveRenderer(*self._args, player_prio=self._prio, loop_passes=2)
 
     def _reseed(self, target):
-        """Return a renderer positioned exactly at `target` content frames: the nearest checkpoint restored and silently fast-forwarded (or from 0 if the racer has not reached that region yet)."""
+        """Renderer positioned at target content frames."""
         snap = self._ckpts.nearest(target)
         r = LiveRenderer.from_snapshot(snap) if snap is not None else self._new_renderer()
         r.fast_forward_to(target)
         return r
 
     def _render_chunk(self, renderer, loop_end):
-        """Produce up to PRODUCE_CHUNK_FRAMES of audio. Returns (block, content_start) or (None, None) when the render has finished with nothing left."""
+        """Produce one audio block, returns (block, content_start) or (None, None)."""
         parts = []
         got = 0
         content_start = None
@@ -222,11 +210,7 @@ class LiveWorker(_ThreadWorker):
         return block, content_start
 
     def _racer(self, token, yield_gil=True):
-        """
-        State-only run > checkpoints + exact length/loop marks.
-
-        When yield_gil=False (called synchronously before the producer), runs at max speed (~150× realtime) — no loop-end undershoot.
-        """
+        """State-only run building checkpoints and the exact length and loop marks."""
         try:
             r = self._new_renderer()
             self._ckpts.add(r.snapshot())
@@ -259,7 +243,7 @@ class LiveWorker(_ThreadWorker):
             pass
 
     def _wait_for_seek(self, token):
-        """After the (non-looping) natural end, stay alive so a later drag still re-seeds. Returns True when a seek arrived, False on cancel."""
+        """Stay alive after the natural end so a later drag can re-seed."""
         while not self._cancel.is_set():
             if audio.live_seek_pending(token):
                 return True
@@ -320,7 +304,7 @@ class LiveWorker(_ThreadWorker):
                     w = audio.live_push(token, content_start + off, block[off:])
                     if w == 0:
                         if audio.live_seek_pending(token):
-                            break # abandon this block; the seek is handled next loop
+                            break # abandon this block, the seek is handled next loop
                         audio.live_wait_space(token, 0.05)
                     else:
                         off += w
@@ -328,15 +312,37 @@ class LiveWorker(_ThreadWorker):
         except Exception as exc:
             self._emit(self.failed, key, str(exc))
 
-class BatchWorker(_ThreadWorker):
-    """Rip a list of tagged jobs to disk, with per-entry progress, per-job
-    summaries and cancellation.
+class CtrPreviewWorker(_ThreadWorker):
+    """Full in-memory render of one 3DS CSAR sound for preview."""
 
-    sdats: OrderedDict[sdat_key, (label, SdatFile)]
-    Each job is (sdat_key, kind, ident, sel):
-      ('arc', arc_id, only_set_or_None) -> one SSAR archive
-      ('seq', None, seq_set_or_None) -> standalone SSEQ music (None = all)
-    """
+    done = Signal(object, object)
+    failed = Signal(object, str)
+
+    def __init__(self, key, archive, sound, rate, parent=None):
+        super().__init__(parent)
+        self._key = key
+        self._archive = archive
+        self._sound = sound
+        self._rate = rate
+        self._cancel = threading.Event()
+
+    def cancel(self):
+        self._cancel.set()
+
+    def _run(self):
+        try:
+            res, _chans, _native_rate, _loop = render_ctr_one(
+                self._archive, self._sound, self._rate)
+        except Exception as exc:
+            self._emit(self.failed, self._key, str(exc))
+            return
+        if self._cancel.is_set():
+            return
+        self._emit(self.done, self._key, res)
+
+
+class BatchWorker(_ThreadWorker):
+    """Rip a list of tagged jobs to disk with progress and cancellation."""
 
     batch_progress = Signal(int, int, object) # done, total, RenderResult
     archive_done = Signal(object) # per-job summary dict
@@ -369,6 +375,8 @@ class BatchWorker(_ThreadWorker):
             return len(self._seq_ids(sk, sel))
         if sel is not None:
             return len(sel)
+        if kind == 'carc':
+            return len(self._sdat(sk).folders[ident])
         return len(self._sdat(sk).seqarc(ident).entries)
 
     def _run(self):
@@ -387,7 +395,17 @@ class BatchWorker(_ThreadWorker):
                 def progress(done, _total, res, _base=base):
                     self._emit(self.batch_progress, _base + done, grand_total, res)
 
-                if kind == 'seq':
+                if kind == 'carc':
+                    summary = rip_ctr_folder(
+                        sdat,
+                        ident,
+                        self._out_root,
+                        rate=self._rate,
+                        only=sel,
+                        progress=progress,
+                        should_cancel=self._cancel.is_set,
+                    )
+                elif kind == 'seq':
                     summary = rip_sequences(
                         sdat,
                         self._seq_ids(sk, sel),

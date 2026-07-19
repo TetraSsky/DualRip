@@ -1,12 +1,10 @@
-# Part of DualRip. SBNK instrument bank parsing. Ported from FeOS Sound System
-# (fincs) / CyberBotX/in_xsf, derived from NNS driver disassembly.
-# FIDELITY-CRITICAL: C integer semantics are intentional.
+"""SBNK instrument bank parsing."""
 
 import struct
 from .common import NNS_RECORD_COUNT_OFF, NNS_RECORD_TABLE_OFF
 
 class NoteDef:
-    """Single note > sample mapping with ADSR envelope and pan."""
+    """One note-to-sample mapping with ADSR and pan."""
 
     __slots__ = (
         'lowNote',
@@ -37,16 +35,12 @@ class NoteDef:
             ) = struct.unpack_from('<HH6B', data, off)
 
 class BankEntry:
-    """One bank slot: record type + list of NoteDef."""
-    
+    """One bank slot."""
+
     __slots__ = ('record', 'instruments')
 
 def parse_sbnk(data):
-    """
-    Parse SBNK blob into list of BankEntry.
-
-    Record type 16 = key-range, 17 = multi-range, other = single instrument.
-    """
+    """Parse an SBNK blob into a list of BankEntry."""
     count = struct.unpack_from('<I', data, NNS_RECORD_COUNT_OFF)[0]
     entries = []
     pos = NNS_RECORD_TABLE_OFF
@@ -58,6 +52,7 @@ def parse_sbnk(data):
         e.record = record
         e.instruments = []
         if record:
+            # record 16 = key-range, 17 = multi-range, else single instrument
             if record == 16:
                 low, high = data[offset], data[offset + 1]
                 p = offset + 2
