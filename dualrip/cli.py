@@ -6,7 +6,7 @@ import sys
 from . import __version__
 from .bankmap import parse_bank_map
 from .export import rip_archive, rip_ctr_folder, rip_sequences
-from .formats.ctr import Boot9RequiredError, find_csars_in_rom, open_bcsar
+from .formats.ctr import Boot9RequiredError, open_ctr_rom, open_bcsar
 from .formats.sdat import SdatFile, find_sdats_in_rom
 
 def _print_summary(summary, note_hint=''):
@@ -115,7 +115,7 @@ def _open_ctr(path, index, boot9=None):
     """Open a 3DS ROM or loose .bcsar, returns one CtrArchive or None."""
     if path.lower().endswith('.bcsar'):
         return open_bcsar(path)
-    archives = find_csars_in_rom(path, boot9=boot9)
+    archives = open_ctr_rom(path, boot9=boot9)
     if index is not None:
         if not 0 <= index < len(archives):
             print(f'error: --archive-index {index} out of range (0-{len(archives)-1})')
@@ -126,7 +126,7 @@ def _open_ctr(path, index, boot9=None):
     print(f'{os.path.basename(path)} contains {len(archives)} CSAR sound archives. Use --archive-index to pick one:')
     for i, arch in enumerate(archives):
         c = arch.counts()
-        print(f'[{i}] {arch.label} — {c["seq"]} CSEQ, {c["wsd"]} CWSD, {c["strm"]} BCSTM, {len(arch.csar.banks)} CBNK, {len(arch.csar.wars)} CWAR')
+        print(f'[{i}] {arch.label} — {c["seq"]} CSEQ, {c["wsd"]} CWSD, {c["strm"]} BCSTM, {len(arch.banks)} CBNK, {len(arch.wars)} CWAR')
     return None
 
 def _run_ctr(args):

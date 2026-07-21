@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 from collections import OrderedDict
 from . import cseq, cstm, cwsd
-from .csar import Csar, safe
+from .csar import Csar, CtrSoundEntry, safe
 from .rom import open_romfs, romfs_walk
 from ...engine.ctr import render_entry, render_wsd
 
@@ -16,18 +16,12 @@ KIND_TITLE = {
     'strm': 'Stream (BCSTM)',
 }
 
-def find_csars_in_rom(rom_path, boot9=None):
-    """One CtrArchive per .bcsar in a ROM, boot9 required for encrypted images."""
-    reader, romfs = open_romfs(rom_path, boot9=boot9)
-    csar_paths = [p for p in romfs_walk(romfs) if p.lower().endswith('.bcsar')]
-    if not csar_paths:
-        raise ValueError(f'No .bcsar sound archive found in {rom_path!r}')
+def _csar_archives(reader, romfs, csar_paths, rom_name):
     ext_groups = []
     for p in romfs_walk(romfs):
         if p.lower().endswith('.bcgrp'):
             with romfs.open(p) as f:
                 ext_groups.append((os.path.splitext(os.path.basename(p))[0], f.read()))
-    rom_name = os.path.basename(rom_path)
     archives = []
     for p in csar_paths:
         with romfs.open(p) as f:
@@ -38,6 +32,25 @@ def find_csars_in_rom(rom_path, boot9=None):
             romfs=romfs, reader=reader, csar_dir=os.path.dirname(p),
         ))
     return archives
+
+def find_csars_in_rom(rom_path, boot9=None):
+    """One CtrArchive per .bcsar in a ROM, boot9 required for encrypted images."""
+    reader, romfs = open_romfs(rom_path, boot9=boot9)
+    csar_paths = [p for p in romfs_walk(romfs) if p.lower().endswith('.bcsar')]
+    if not csar_paths:
+        raise ValueError(f'No .bcsar sound archive found in {rom_path!r}')
+    return _csar_archives(reader, romfs, csar_paths, os.path.basename(rom_path))
+
+def open_ctr_rom(rom_path, boot9=None):
+    """CtrArchive list: the ROM's .bcsar archives or a loose-stream archive."""
+    reader, romfs = open_romfs(rom_path, boot9=boot9)
+    csar_paths = [p for p in romfs_walk(romfs) if p.lower().endswith('.bcsar')]
+    if csar_paths:
+        return _csar_archives(reader, romfs, csar_paths, os.path.basename(rom_path))
+    streams = [p for p in romfs_walk(romfs) if p.lower().endswith('.bcstm')]
+    if not streams:
+        raise ValueError(f'No .bcsar archive or .bcstm stream found in {rom_path!r}')
+    return [CtrArchive.from_streams(streams, os.path.basename(rom_path), romfs, reader)]
 
 def open_bcsar(path):
     """Open a loose .bcsar, reading .bcgrp groups from a sibling extData/ dir."""
@@ -90,6 +103,42 @@ class CtrArchive:
         if ungrouped:
             self.folders['_ungrouped'] = sorted(ungrouped, key=lambda s: s.name)
         self._by_index = {s.index: s for s in self.sounds}
+        self.banks = self.csar.banks
+        self.wars = self.csar.wars
+        self._stream_paths = {}
+
+    @classmethod
+    def from_streams(cls, stream_paths, label, romfs, reader):
+        """CtrArchive backed by loose RomFS .bcstm streams with no CSAR index."""
+        self = cls.__new__(cls)
+        self.label = label
+        self._romfs = romfs
+        self._reader = reader
+        self._csar_dir = ''
+        self.csar = None
+        self.group_variants = {}
+        self.ctx = None
+        self.unapplied = {}
+        self.banks = []
+        self.wars = []
+        self.sounds = []
+        self._stream_paths = {}
+        ordered = sorted(stream_paths, key=lambda p: (os.path.basename(p).lower(), p.lower()))
+        for i, path in enumerate(ordered):
+            s = CtrSoundEntry()
+            s.index = i
+            s.name = os.path.splitext(os.path.basename(path))[0]
+            s.kind = 'stream'
+            s.file_id = -1
+            s.player_id = -1
+            s.volume = 127
+            self.sounds.append(s)
+            self._stream_paths[i] = path
+        self.folders = OrderedDict()
+        if self.sounds:
+            self.folders['STRM'] = list(self.sounds)
+        self._by_index = {s.index: s for s in self.sounds}
+        return self
 
     def sound(self, index):
         return self._by_index[index]
@@ -127,10 +176,14 @@ class CtrArchive:
         """Render one sound to (native_rate, chans, loop)."""
         kind = KIND_LABEL[s.kind]
         if kind == 'strm':
-            entry = self.csar.files[s.file_id]
-            if entry[0] != 'external':
-                raise LookupError('stream file %d not external' % s.file_id)
-            info, chans = cstm.decode_cstm(self._read_stream_file(entry[1]))
+            if self.csar is None:
+                data = self._read_stream_file(self._stream_paths[s.index])
+            else:
+                entry = self.csar.files[s.file_id]
+                if entry[0] != 'external':
+                    raise LookupError('stream file %d not external' % s.file_id)
+                data = self._read_stream_file(entry[1])
+            info, chans = cstm.decode_cstm(data)
             loop = (info.loop_start, info.sample_count) if info.loop_flag else None
             return info.sample_rate, chans, loop
         if kind == 'seq':

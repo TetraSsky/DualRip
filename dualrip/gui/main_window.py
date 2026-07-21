@@ -34,7 +34,7 @@ except ImportError:
     QMediaDevices = None
 from .. import __version__
 from ..bankmap import BankResolver, parse_bank_map
-from ..formats.ctr import KIND_TITLE, CtrArchive, find_csars_in_rom, open_bcsar
+from ..formats.ctr import KIND_TITLE, CtrArchive, open_ctr_rom, open_bcsar
 from ..formats.sdat import SdatFile, find_sdats_in_rom
 from . import audio
 from .dialogs import (
@@ -462,7 +462,7 @@ class MainWindow(QMainWindow):
 
     def _open_ctr_rom(self, path, preset=None):
         """Open a .cia/.3ds ROM and extract its CSAR archive(s)."""
-        archives = find_csars_in_rom(path, boot9=load_settings()['boot9'] or None)
+        archives = open_ctr_rom(path, boot9=load_settings()['boot9'] or None)
         chosen = None
         if preset:
             chosen = [a for i, a in enumerate(archives) if i in set(preset)] or None
@@ -552,7 +552,7 @@ class MainWindow(QMainWindow):
         lst.setSelectionMode(QAbstractItemView.ExtendedSelection)
         for i, arch in enumerate(archives):
             c = arch.counts()
-            text = (f'#{i:>3d}  {arch.label}  |  {c["seq"]:>4d} CSEQ, {c["wsd"]:>3d} CWSD, {c["strm"]:>3d} BCSTM, {len(arch.csar.banks):>3d} CBNK, {len(arch.csar.wars):>3d} CWAR')
+            text = (f'#{i:>3d}  {arch.label}  |  {c["seq"]:>4d} CSEQ, {c["wsd"]:>3d} CWSD, {c["strm"]:>3d} BCSTM, {len(arch.banks):>3d} CBNK, {len(arch.wars):>3d} CWAR')
             item = QListWidgetItem(text)
             item.setData(Qt.UserRole, arch)
             lst.addItem(item)
@@ -768,7 +768,7 @@ class MainWindow(QMainWindow):
                 return ''
             return 'wave archive , '.join(str(w) for w in wars)
 
-        banks = arch.csar.banks
+        banks = arch.banks
         cat_bank = QTreeWidgetItem(['Banks (CBNK)', '', f'{len(banks)}'])
         cat_bank.setData(0, ROLE_KIND, 'cat')
         cat_bank.setData(0, ROLE_SDAT, sdat_key)
@@ -780,7 +780,7 @@ class MainWindow(QMainWindow):
             cat_bank.addChild(it)
         root.addChild(cat_bank)
 
-        wars = arch.csar.wars
+        wars = arch.wars
         cat_war = QTreeWidgetItem(['Wave Archives (CWAR)', '', f'{len(wars)}'])
         cat_war.setData(0, ROLE_KIND, 'cat')
         cat_war.setData(0, ROLE_SDAT, sdat_key)
