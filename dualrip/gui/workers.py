@@ -8,11 +8,15 @@ from ..engine.sdat.render import LiveRenderer, render_entry_stream
 from ..export import (
     RenderResult,
     render_ctr_one,
+    render_dse_one,
     rip_archive,
     rip_ctr_folder,
+    rip_dse_folder,
     rip_sequences,
 )
 from . import audio
+
+DSE_RATE = 32728  # DSE native mixing rate
 
 # streaming preview pacing
 PRIME_SECONDS = 0.3 # buffer before playback auto-starts
@@ -340,6 +344,31 @@ class CtrPreviewWorker(_ThreadWorker):
             return
         self._emit(self.done, self._key, res)
 
+class DsePreviewWorker(_ThreadWorker):
+    """Full in-memory render of one DSE sequence for preview."""
+
+    done = Signal(object, object)
+    failed = Signal(object, str)
+
+    def __init__(self, key, archive, entry, parent=None):
+        super().__init__(parent)
+        self._key = key
+        self._archive = archive
+        self._entry = entry
+        self._cancel = threading.Event()
+
+    def cancel(self):
+        self._cancel.set()
+
+    def _run(self):
+        try:
+            res, _audio, _rate, _loop = render_dse_one(self._archive, self._entry, DSE_RATE)
+        except Exception as exc:
+            self._emit(self.failed, self._key, str(exc))
+            return
+        if self._cancel.is_set():
+            return
+        self._emit(self.done, self._key, res)
 
 class BatchWorker(_ThreadWorker):
     """Rip a list of tagged jobs to disk with progress and cancellation."""
@@ -375,7 +404,7 @@ class BatchWorker(_ThreadWorker):
             return len(self._seq_ids(sk, sel))
         if sel is not None:
             return len(sel)
-        if kind == 'carc':
+        if kind == 'carc' or kind == 'dse':
             return len(self._sdat(sk).folders[ident])
         return len(self._sdat(sk).seqarc(ident).entries)
 
@@ -401,6 +430,16 @@ class BatchWorker(_ThreadWorker):
                         ident,
                         self._out_root,
                         rate=self._rate,
+                        only=sel,
+                        progress=progress,
+                        should_cancel=self._cancel.is_set,
+                    )
+                elif kind == 'dse':
+                    summary = rip_dse_folder(
+                        sdat,
+                        ident,
+                        self._out_root,
+                        rate=DSE_RATE,
                         only=sel,
                         progress=progress,
                         should_cancel=self._cancel.is_set,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import os
+import struct
 from collections import OrderedDict
 from . import cseq, cstm, cwsd
 from .csar import Csar, CtrSoundEntry, safe
@@ -96,12 +97,17 @@ class CtrArchive:
             else:
                 ungrouped.append(s)
         self.folders = OrderedDict()
+        self.folder_ids = {} # sound-set ordinal behind each folder key
         for (gi, gname), members in sorted(grouped.items()):
-            self.folders['%03d_%s' % (gi, safe(gname))] = sorted(members, key=lambda s: s.name)
+            key = '%03d_%s' % (gi, safe(gname))
+            self.folders[key] = sorted(members, key=lambda s: s.name)
+            self.folder_ids[key] = gi
         if streams:
             self.folders['STRM'] = sorted(streams, key=lambda s: s.name)
+            self.folder_ids['STRM'] = None
         if ungrouped:
             self.folders['_ungrouped'] = sorted(ungrouped, key=lambda s: s.name)
+            self.folder_ids['_ungrouped'] = None
         self._by_index = {s.index: s for s in self.sounds}
         self.banks = self.csar.banks
         self.wars = self.csar.wars
@@ -131,12 +137,14 @@ class CtrArchive:
             s.kind = 'stream'
             s.file_id = -1
             s.player_id = -1
-            s.volume = 127
+            s.volume = None # a loose stream carries no volume field
             self.sounds.append(s)
             self._stream_paths[i] = path
         self.folders = OrderedDict()
+        self.folder_ids = {}
         if self.sounds:
             self.folders['STRM'] = list(self.sounds)
+            self.folder_ids['STRM'] = None
         self._by_index = {s.index: s for s in self.sounds}
         return self
 
@@ -163,6 +171,34 @@ class CtrArchive:
         blob = self.ctx.file_bytes(fid, 'war %d' % war_index)
         return len(cseq.parse_cwar(blob))
 
+    def bank_name(self, bank_id):
+        """CSAR name of a bank id, or None when the id is out of range."""
+        if 0 <= bank_id < len(self.banks):
+            return self.banks[bank_id][1]
+        return None
+
+    def stream_dir(self, index):
+        """RomFS folder holding a loose stream, empty when the archive is CSAR-backed."""
+        path = self._stream_paths.get(index)
+        return os.path.dirname(path) if path else ''
+
+    def _stream_bytes(self, s):
+        """Raw bytes of a stream sound."""
+        if self.csar is None:
+            return self._read_stream_file(self._stream_paths[s.index])
+        entry = self.csar.files[s.file_id]
+        if entry[0] != 'external':
+            raise LookupError('stream file %d not external' % s.file_id)
+        return self._read_stream_file(entry[1])
+
+    def stream_format(self, s):
+        """Codec, channel count and native rate of a stream, or None when unreadable."""
+        try:
+            info = cstm.StreamInfo(self._stream_bytes(s))
+        except (LookupError, ValueError, OSError, IndexError, struct.error):
+            return None
+        return (cstm.CODEC_NAMES.get(info.codec, str(info.codec)), info.num_channels, info.sample_rate)
+
     def _read_stream_file(self, rel):
         """Read an external stream file (RomFS path relative to the CSAR)"""
         path = (self._csar_dir + '/' + rel) if self._csar_dir else rel
@@ -176,13 +212,7 @@ class CtrArchive:
         """Render one sound to (native_rate, chans, loop)."""
         kind = KIND_LABEL[s.kind]
         if kind == 'strm':
-            if self.csar is None:
-                data = self._read_stream_file(self._stream_paths[s.index])
-            else:
-                entry = self.csar.files[s.file_id]
-                if entry[0] != 'external':
-                    raise LookupError('stream file %d not external' % s.file_id)
-                data = self._read_stream_file(entry[1])
+            data = self._stream_bytes(s)
             info, chans = cstm.decode_cstm(data)
             loop = (info.loop_start, info.sample_count) if info.loop_flag else None
             return info.sample_rate, chans, loop

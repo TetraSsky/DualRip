@@ -35,6 +35,7 @@ except ImportError:
 from .. import __version__
 from ..bankmap import BankResolver, parse_bank_map
 from ..formats.ctr import KIND_TITLE, CtrArchive, open_ctr_rom, open_bcsar
+from ..formats.dse import DseArchive, KIND_LABEL as DSE_KIND_LABEL, open_dse_rom
 from ..formats.sdat import SdatFile, find_sdats_in_rom
 from . import audio
 from .dialogs import (
@@ -45,10 +46,21 @@ from .dialogs import (
     save_recent_files,
 )
 from .player import PlayerBar
-from .workers import CtrPreviewWorker, LiveWorker, StreamWorker
+from .workers import DSE_RATE, CtrPreviewWorker, DsePreviewWorker, LiveWorker, StreamWorker
 
 CACHE_SIZE = 48
 CACHE_MAX_BYTES = 256 * 1024 * 1024
+
+# DSE collection folders: panel type and count noun
+DSE_COLLECTION_TITLE = {
+    'SEQ': 'Music sequence collection',
+    'SFX': 'Sound effect collection',
+    'STRM': 'Stream collection',
+}
+DSE_COLLECTION_NOUN = {'SEQ': 'sequences', 'SFX': 'effects', 'STRM': 'streams'}
+
+# CSAR sound kinds: noun used when a sound belongs to no sound set
+CTR_SOUND_NOUN = {'seq': 'sequence', 'wsd': 'wave', 'strm': 'stream'}
 
 # --- layout constants ---
 FORM_HSPACING = 32
@@ -220,6 +232,8 @@ class MainWindow(QMainWindow):
         self.lbl_bank = QLabel('-')
         self.lbl_bank.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.lbl_bank.setWordWrap(True)
+        self.lbl_format = QLabel('-')
+        self.lbl_format.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.lbl_volume = QLabel('-')
         self.lbl_volume.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.lbl_duration = QLabel('-')
@@ -232,6 +246,7 @@ class MainWindow(QMainWindow):
         form.addRow('Type', self.lbl_kind)
         form.addRow('Location', self.lbl_where)
         form.addRow('Bank', self.lbl_bank)
+        form.addRow('Format', self.lbl_format)
         form.addRow('Entry volume', self.lbl_volume)
         form.addRow('Duration', self.lbl_duration)
         form.addRow('Loop', self.lbl_loop)
@@ -434,8 +449,12 @@ class MainWindow(QMainWindow):
         self._remember_recent(path, None)
 
     def _open_nds(self, path, preset=None):
-        """Open a .nds ROM and extract its SDAT(s)."""
-        sdats = find_sdats_in_rom(path)
+        """Open a .nds ROM: its SDAT audio, or DSE audio if it has none."""
+        try:
+            sdats = find_sdats_in_rom(path)
+        except ValueError:
+            self._open_dse_rom(path)
+            return
         chosen = None
         if preset:
             chosen = [s for s in sdats if s['index'] in set(preset)] or None
@@ -489,6 +508,18 @@ class MainWindow(QMainWindow):
         self._clear_all()
         self._sdats['0'] = (arch.label, arch)
         self._sdat_path = path
+        self._generation += 1
+        self._fill_tree()
+        self._remember_recent(path, None)
+
+    def _open_dse_rom(self, path):
+        """Open a .nds ROM's embedded DSE audio."""
+        arch = open_dse_rom(path)
+        if not arch.sounds:
+            raise ValueError('no SDAT or DSE audio found in this ROM')
+        self._clear_all()
+        self._sdats['0'] = (arch.label, arch)
+        self._sdat_path = os.path.basename(path)
         self._generation += 1
         self._fill_tree()
         self._remember_recent(path, None)
@@ -591,6 +622,9 @@ class MainWindow(QMainWindow):
             if isinstance(sdat, CtrArchive):
                 self._fill_tree_ctr(sdat_key, label, sdat, single)
                 continue
+            if isinstance(sdat, DseArchive):
+                self._fill_tree_dse(sdat_key, label, sdat, single)
+                continue
             n_arcs = len(sdat.seqarc_list)
             n_sseq = len(sdat.sequence_list)
             n_banks = sdat.num_banks
@@ -599,7 +633,7 @@ class MainWindow(QMainWindow):
             info_parts = [f'{n_arcs} SSAR, {total_entries} entries']
             if n_sseq:
                 info_parts.append(f'{n_sseq} SSEQ')
-            info_parts.append(f'{n_banks} banks, {n_swar} SWAR')
+            info_parts.append(f'{n_banks} SBNK, {n_swar} SWAR')
             info = ', '.join(info_parts)
 
             sdat_root = QTreeWidgetItem([label, '', info])
@@ -611,7 +645,7 @@ class MainWindow(QMainWindow):
                 item.setData(0, ROLE_SDAT, sdat_key)
 
             # --- Sequence Archives (SSAR) ---
-            cat_arcs = QTreeWidgetItem(['Sequence Archives (SSAR)', '', ''])
+            cat_arcs = QTreeWidgetItem(['Sequence Archives (SSAR)', '', f'{n_arcs}'])
             cat_arcs.setData(0, ROLE_KIND, 'cat')
             _set_sdat(cat_arcs)
             for arc_id, name, _count in sdat.seqarc_list:
@@ -723,12 +757,16 @@ class MainWindow(QMainWindow):
             groups = [(folder, [s for s in members if s.kind == kfilter])
                       for folder, members in arch.folders.items() if folder != 'STRM']
             groups = [(f, m) for f, m in groups if m]
+            if not groups:
+                return 0
             # blank category header
-            cat = QTreeWidgetItem([title, '', ''])
+            cat = QTreeWidgetItem([title, '', f'{len(groups)}'])
             cat.setData(0, ROLE_KIND, 'cat')
             cat.setData(0, ROLE_SDAT, sdat_key)
             for folder, members in groups:
-                top = QTreeWidgetItem([folder, '', f'{len(members)} entries'])
+                idx, setname = self._ctr_folder_parts(arch, folder)
+                top = QTreeWidgetItem([setname, '' if idx is None else f'{idx:03d}',
+                                       f'{len(members)} entries'])
                 top.setData(0, ROLE_KIND, 'carc')
                 top.setData(0, ROLE_ARC, folder)
                 top.setData(0, ROLE_KFILTER, kfilter)
@@ -743,13 +781,14 @@ class MainWindow(QMainWindow):
         n_wsd_sets = add_kind_category('Wave Sounds (CWSD)', 'wave')
 
         streams = arch.folders.get('STRM', [])
-        cat_strm = QTreeWidgetItem(['Streams (BCSTM)', '', f'{len(streams)}'])
-        cat_strm.setData(0, ROLE_KIND, 'cstrmcat')
-        cat_strm.setData(0, ROLE_ARC, 'STRM')
-        cat_strm.setData(0, ROLE_SDAT, sdat_key)
-        for s in streams:
-            add_centry(cat_strm, 'STRM', s)
-        root.addChild(cat_strm)
+        if streams:
+            cat_strm = QTreeWidgetItem(['Streams (BCSTM)', '', f'{len(streams)}'])
+            cat_strm.setData(0, ROLE_KIND, 'cstrmcat')
+            cat_strm.setData(0, ROLE_ARC, 'STRM')
+            cat_strm.setData(0, ROLE_SDAT, sdat_key)
+            for s in streams:
+                add_centry(cat_strm, 'STRM', s)
+            root.addChild(cat_strm)
 
         def war_info(i):
             """Wave count for a CWAR, blank when unresolved."""
@@ -760,44 +799,117 @@ class MainWindow(QMainWindow):
 
         def bank_info_wars(i):
             """Info text for a bank's wave archives."""
-            try:
-                wars = arch.bank_wave_archives(i)
-            except (LookupError, ValueError):
-                return ''
+            wars = self._ctr_bank_wars(arch, i)
             if not wars:
                 return ''
-            return 'wave archive , '.join(str(w) for w in wars)
+            return 'wave archives ' + ', '.join(str(w) for w in wars)
 
         banks = arch.banks
-        cat_bank = QTreeWidgetItem(['Banks (CBNK)', '', f'{len(banks)}'])
+        if banks:
+            cat_bank = QTreeWidgetItem(['Banks (CBNK)', '', f'{len(banks)}'])
+            cat_bank.setData(0, ROLE_KIND, 'cat')
+            cat_bank.setData(0, ROLE_SDAT, sdat_key)
+            for i, (_file_id, name) in enumerate(banks):
+                it = QTreeWidgetItem([name or f'BANK_{i}', str(i), bank_info_wars(i)])
+                it.setData(0, ROLE_KIND, 'cbank')
+                it.setData(0, ROLE_INDEX, i)
+                it.setData(0, ROLE_SDAT, sdat_key)
+                cat_bank.addChild(it)
+            root.addChild(cat_bank)
+
+        wars = arch.wars
+        if wars:
+            cat_war = QTreeWidgetItem(['Wave Archives (CWAR)', '', f'{len(wars)}'])
+            cat_war.setData(0, ROLE_KIND, 'cat')
+            cat_war.setData(0, ROLE_SDAT, sdat_key)
+            for i, _file_id in enumerate(wars):
+                it = QTreeWidgetItem([f'WAR_{i:03d}', str(i), war_info(i)])
+                it.setData(0, ROLE_KIND, 'cwarv')
+                it.setData(0, ROLE_INDEX, i)
+                it.setData(0, ROLE_SDAT, sdat_key)
+                cat_war.addChild(it)
+            root.addChild(cat_war)
+
+        c = arch.counts()
+        parts = []
+        if n_seq_sets:
+            parts.append(f'{n_seq_sets} CSEQ, {c["seq"]} entries')
+        if n_wsd_sets:
+            parts.append(f'{n_wsd_sets} CWSD, {c["wsd"]} entries')
+        if streams:
+            parts.append(f'{len(streams)} BCSTM')
+        if banks:
+            parts.append(f'{len(banks)} CBNK')
+        if wars:
+            parts.append(f'{len(wars)} CWAR')
+        root.setText(2, ', '.join(parts))
+
+        self.tree.addTopLevelItem(root)
+        if single:
+            root.setExpanded(True)
+
+    def _fill_tree_dse(self, sdat_key, label, arch, single):
+        """DSE folder tree, laid out type-first like the DS SDAT tree."""
+        root = QTreeWidgetItem([label, '', ''])
+        root.setData(0, ROLE_KIND, 'dse')
+        root.setData(0, ROLE_SDAT, sdat_key)
+        root.setFlags(root.flags() & ~Qt.ItemIsSelectable)
+
+        for title, folder in (('Sequences (SMDL)', 'SEQ'), ('Sound Effects (SEDL)', 'SFX'), ('Streams (SADL)', 'STRM')):
+            members = arch.folders.get(folder)
+            if not members:
+                continue
+            cat = QTreeWidgetItem([title, '', f'{len(members)}'])
+            cat.setData(0, ROLE_KIND, 'dseqcat')
+            cat.setData(0, ROLE_ARC, folder)
+            cat.setData(0, ROLE_SDAT, sdat_key)
+            for s in members:
+                detail = '' if s.kind == 'stream' else f'bank {s.bank_name}'
+                it = QTreeWidgetItem([s.name, str(s.index), detail])
+                it.setData(0, ROLE_KIND, 'dseq')
+                it.setData(0, ROLE_ARC, folder)
+                it.setData(0, ROLE_INDEX, s.index)
+                it.setData(0, ROLE_SDAT, sdat_key)
+                self._item_index[(sdat_key, 'dse', s.index)] = it
+                cat.addChild(it)
+            root.addChild(cat)
+
+        cat_bank = QTreeWidgetItem(['Sample Banks (SWDL)', '', f'{len(arch.sample_banks)}'])
         cat_bank.setData(0, ROLE_KIND, 'cat')
         cat_bank.setData(0, ROLE_SDAT, sdat_key)
-        for i, (_file_id, name) in enumerate(banks):
-            it = QTreeWidgetItem([name or f'BANK_{i}', str(i), bank_info_wars(i)])
-            it.setData(0, ROLE_KIND, 'cbank')
-            it.setData(0, ROLE_INDEX, i)
+        for key, sw in sorted(arch.sample_banks.items(), key=lambda kv: arch.display.get(kv[0], kv[0])):
+            it = QTreeWidgetItem([arch.display.get(key, key), '', f'{len(sw.samples)} samples'])
+            it.setData(0, ROLE_KIND, 'dbank')
+            it.setData(0, ROLE_ARC, key)
             it.setData(0, ROLE_SDAT, sdat_key)
             cat_bank.addChild(it)
         root.addChild(cat_bank)
 
-        wars = arch.wars
-        cat_war = QTreeWidgetItem(['Wave Archives (CWAR)', '', f'{len(wars)}'])
-        cat_war.setData(0, ROLE_KIND, 'cat')
-        cat_war.setData(0, ROLE_SDAT, sdat_key)
-        for i, _file_id in enumerate(wars):
-            it = QTreeWidgetItem([f'WAR_{i:03d}', str(i), war_info(i)])
-            it.setData(0, ROLE_KIND, 'cwarv')
-            it.setData(0, ROLE_INDEX, i)
+        cat_pre = QTreeWidgetItem(['Preset Banks (SWDL)', '', f'{len(arch.presets)}'])
+        cat_pre.setData(0, ROLE_KIND, 'cat')
+        cat_pre.setData(0, ROLE_SDAT, sdat_key)
+        for key, sw in sorted(arch.presets.items(), key=lambda kv: arch.display.get(kv[0], kv[0])):
+            it = QTreeWidgetItem([arch.display.get(key, key), '', f'{len(sw.programs)} programs'])
+            it.setData(0, ROLE_KIND, 'dpre')
+            it.setData(0, ROLE_ARC, key)
             it.setData(0, ROLE_SDAT, sdat_key)
-            cat_war.addChild(it)
-        root.addChild(cat_war)
+            cat_pre.addChild(it)
+        root.addChild(cat_pre)
 
         c = arch.counts()
-        root.setText(2, (f'{n_seq_sets} CSEQ, {c["seq"]} entries, {c["strm"]} BCSTM, {len(banks)} CBNK, {len(wars)} CWAR, {n_wsd_sets} CWSD, {c["wsd"]} entries'))
-
+        parts = []
+        if c['seq']:
+            parts.append(f'{c["seq"]} SMDL')
+        if c['sfx']:
+            parts.append(f'{c["sfx"]} SEDL')
+        if c['stream']:
+            parts.append(f'{c["stream"]} SADL')
+        parts.append(f'{len(arch.sample_banks)} sample banks')
+        parts.append(f'{len(arch.presets)} presets')
+        root.setText(2, ', '.join(parts))
         self.tree.addTopLevelItem(root)
         if single:
-            root.setExpanded(True) 
+            root.setExpanded(True)
 
     def _update_status_and_title(self):
         if not self._sdats:
@@ -806,23 +918,19 @@ class MainWindow(QMainWindow):
         total_sseq = 0
         n_sdats = len(self._sdats)
         for _label, sdat in self._sdats.values():
-            if isinstance(sdat, CtrArchive):
+            if isinstance(sdat, (CtrArchive, DseArchive)):
                 total_entries += len(sdat.sounds)
                 continue
             total_entries += sum(c for _i, _n, c in sdat.seqarc_list)
             total_sseq += len(sdat.sequence_list)
         base = os.path.basename(self._sdat_path or '')
-        all_ctr = all(isinstance(o, CtrArchive) for _l, o in self._sdats.values())
+        all_ctr = all(isinstance(o, (CtrArchive, DseArchive)) for _l, o in self._sdats.values())
         if all_ctr:
             self.statusBar().showMessage(f'{base} - {total_entries} sounds.')
         elif n_sdats == 1:
-            self.statusBar().showMessage(
-                f'{base} - {total_entries} entries, {total_sseq} music sequences.'
-            )
+            self.statusBar().showMessage(f'{base} - {total_entries} sounds, {total_sseq} music sequences.')
         else:
-            self.statusBar().showMessage(
-                f'{base} - {n_sdats} SDATs, {total_entries} entries, {total_sseq} music sequences.'
-            )
+            self.statusBar().showMessage(f'{base} - {n_sdats} SDATs, {total_entries} sounds, {total_sseq} music sequences.')
         self.setWindowTitle(f'DualRip - {base}' if base else 'DualRip')
 
     def _apply_filter(self, text):
@@ -906,14 +1014,29 @@ class MainWindow(QMainWindow):
     def _ctr_cache_key(self, sk, sound):
         return (self._generation, sk, 'ctr', sound.index, self.settings['rate'])
 
+    def _current_dse_sound(self):
+        """(archive, sdat_key, entry) for the current DSE item, or Nones."""
+        it = self.tree.currentItem()
+        if it is None or not self._sdats or it.data(0, ROLE_KIND) != 'dseq':
+            return None, None, None
+        sk = self._sdat_key_for(it)
+        arch = self._sdats[sk][1]
+        return arch, sk, arch.sound(it.data(0, ROLE_INDEX))
+
+    def _dse_cache_key(self, sk, entry):
+        return (self._generation, sk, 'dse', entry.index, DSE_RATE)
+
     def _current_key(self):
-        """Cache key of the currently selected playable item (DS or 3DS), or None"""
+        """Cache key of the currently selected playable item (DS, 3DS or DSE), or None"""
         _sd, sk, seqarc, entry = self._current_playable()
         if entry is not None:
             return self._cache_key(sk, seqarc, entry)
         _arch, sk, sound = self._current_ctr_sound()
         if sound is not None:
             return self._ctr_cache_key(sk, sound)
+        _arch, sk, dentry = self._current_dse_sound()
+        if dentry is not None:
+            return self._dse_cache_key(sk, dentry)
         return None
 
     def _selection_changed(self, *_):
@@ -922,9 +1045,10 @@ class MainWindow(QMainWindow):
             return
         sdat = self._sdat_for(it)
         kind = it.data(0, ROLE_KIND)
-        self.player.setVisible(kind in ('entry', 'seq', 'centry'))
+        self.player.setVisible(kind in ('entry', 'seq', 'centry', 'dseq'))
         for lbl in (
             self.lbl_bank,
+            self.lbl_format,
             self.lbl_volume,
             self.lbl_duration,
             self.lbl_loop,
@@ -935,7 +1059,7 @@ class MainWindow(QMainWindow):
             _sd, sk, seqarc, entry = self._current_playable()
             self.lbl_name.setText(entry.name)
             if kind == 'entry':
-                self.lbl_kind.setText('Sound effect (SSAR entry)')
+                self.lbl_kind.setText('Sound effect (SSAR)')
                 self.lbl_where.setText(f'{seqarc.arc_id:03d}  {seqarc.name}  [{entry.index}]')
             else:
                 self.lbl_kind.setText('Music sequence (SSEQ)')
@@ -955,18 +1079,55 @@ class MainWindow(QMainWindow):
             kl = arch.kind_label(sound)
             self.lbl_name.setText(sound.name)
             self.lbl_kind.setText(KIND_TITLE[kl])
-            parent = it.parent()
-            folder = parent.text(0) if parent is not None else ''
-            self.lbl_where.setText(f'{folder}  [{sound.index}]')
+            idx, setname = self._ctr_folder_parts(arch, it.data(0, ROLE_ARC))
+            folder = arch.stream_dir(sound.index).lstrip('/')
+            if folder:
+                self.lbl_where.setText(f'{folder} [{sound.index}]')
+            elif idx is not None:
+                self.lbl_where.setText(f'{idx:03d} {setname} [{sound.index}]')
+            else:
+                self.lbl_where.setText(f'{CTR_SOUND_NOUN[kl]} {sound.index}')
             if kl == 'seq' and sound.bank_ids:
-                shown = ', '.join(str(b) for b in sound.bank_ids if b != 0xFFFFFF)
+                shown = ', '.join(self._ctr_bank_label(arch, b) for b in sound.bank_ids if b != 0xFFFFFF)
                 self.lbl_bank.setText(shown or '-')
-            self.lbl_volume.setText(str(sound.volume))
+            if kl == 'strm':
+                self.lbl_format.setText(self._stream_format_label(arch.stream_format(sound)))
+            if sound.volume is not None:
+                self.lbl_volume.setText(str(sound.volume))
             self._show_render(self._cache.get(self._ctr_cache_key(sk, sound)))
-        elif kind == 'carc':
+        elif kind == 'dseq':
+            arch, sk, entry = self._current_dse_sound()
+            self.lbl_name.setText(entry.name)
+            self.lbl_kind.setText(DSE_KIND_LABEL[entry.kind])
+            noun = {'seq': 'sequence', 'sfx': 'effect', 'stream': 'stream'}[entry.kind]
+            self.lbl_where.setText(f'{noun} {entry.index}')
+            if entry.kind == 'stream':
+                info = entry.info
+                self.lbl_format.setText(f'{info.codec_name}, {info.channels} ch, {info.sample_rate} Hz')
+            else:
+                self.lbl_bank.setText(entry.bank_name)
+            self._show_render(self._cache.get(self._dse_cache_key(sk, entry)))
+        elif kind == 'dseqcat':
+            arch = self._sdat_for(it)
             self.lbl_name.setText(it.text(0))
-            self.lbl_kind.setText('Sound set (CSAR sound set, SSAR analog)')
-            self.lbl_where.setText(f'sound set {it.text(0)}')
+            folder = it.data(0, ROLE_ARC)
+            self.lbl_kind.setText(DSE_COLLECTION_TITLE.get(folder, 'Sound collection'))
+            self.lbl_where.setText(f'{it.text(2)} {DSE_COLLECTION_NOUN.get(folder, "sounds")}')
+            self.lbl_status.setText(f'from {arch.label}')
+        elif kind in ('dbank', 'dpre'):
+            arch = self._sdat_for(it)
+            tables = arch.sample_banks if kind == 'dbank' else arch.presets
+            sw = tables.get(it.data(0, ROLE_ARC))
+            self.lbl_name.setText(it.text(0))
+            self.lbl_kind.setText('Sample bank (SWDL)' if kind == 'dbank' else 'Instrument bank (SWDL)')
+            if sw is not None:
+                self.lbl_where.setText(f'{len(sw.samples)} samples' if kind == 'dbank' else f'{len(sw.programs)} programs')
+        elif kind == 'carc':
+            arch = self._sdat_for(it)
+            idx, _setname = self._ctr_folder_parts(arch, it.data(0, ROLE_ARC))
+            self.lbl_name.setText(it.text(0))
+            self.lbl_kind.setText('Sound set (CSAR)' if idx is not None else 'Sound collection (CSAR)')
+            self.lbl_where.setText(f'sound set {idx:03d}' if idx is not None else 'ungrouped')
             self.lbl_status.setText(it.text(2))
         elif kind == 'cstrmcat':
             self.lbl_name.setText('Streams (BCSTM)')
@@ -977,13 +1138,18 @@ class MainWindow(QMainWindow):
                 lbl = self._sdats[sk][0] if sk in self._sdats else ''
                 self.lbl_status.setText(f'from {lbl}' if lbl else 'select to export all streams')
         elif kind == 'cbank':
+            arch = self._sdat_for(it)
             self.lbl_name.setText(it.text(0))
             self.lbl_kind.setText('Instrument bank (CBNK)')
             self.lbl_where.setText(f'bank {it.text(1)}')
+            wars = self._ctr_bank_wars(arch, it.data(0, ROLE_INDEX))
+            if wars:
+                self.lbl_bank.setText('wave archives: ' + ', '.join(str(w) for w in wars))
         elif kind == 'cwarv':
             self.lbl_name.setText(it.text(0))
             self.lbl_kind.setText('Wave archive (CWAR)')
             self.lbl_where.setText(f'wave archive {it.text(1)}')
+            self.lbl_status.setText(it.text(2))
         elif kind == 'csar':
             self.lbl_name.setText(it.text(0))
             self.lbl_kind.setText('CSAR container (3DS)')
@@ -1035,6 +1201,32 @@ class MainWindow(QMainWindow):
             self.lbl_name.setText(it.text(0))
             self.lbl_kind.setText('-')
             self.lbl_where.setText('-')
+
+    def _ctr_folder_parts(self, arch, key):
+        """(sound-set ordinal, display name) of a CSAR folder key, ordinal None when ungrouped."""
+        idx = arch.folder_ids.get(key)
+        if idx is None:
+            return None, 'Ungrouped'
+        return idx, (key.split('_', 1)[1] if '_' in key else key)
+
+    def _ctr_bank_label(self, arch, bank_id):
+        """Bank id followed by its CSAR name when the table has one."""
+        name = arch.bank_name(bank_id)
+        return f'{bank_id} {name}' if name else str(bank_id)
+
+    def _stream_format_label(self, fmt):
+        """Codec, channel count and native rate of a stream, or '-' when unknown."""
+        if fmt is None:
+            return '-'
+        codec, channels, rate = fmt
+        return f'{codec}, {channels} ch, {rate} Hz'
+
+    def _ctr_bank_wars(self, arch, bank_index):
+        """Wave-archive indices of a CBNK, empty when the bank is ambiguous or unreadable."""
+        try:
+            return arch.bank_wave_archives(bank_index)
+        except (LookupError, ValueError):
+            return []
 
     def _show_render(self, res):
         if res is None:
@@ -1166,6 +1358,10 @@ class MainWindow(QMainWindow):
         if sound is not None:
             self._play_ctr(arch, csk, sound)
             return
+        darch, dsk, dentry = self._current_dse_sound()
+        if dentry is not None:
+            self._play_dse(darch, dsk, dentry)
+            return
         sdat, sk, seqarc, entry = self._current_playable()
         if entry is None or sdat is None:
             return
@@ -1215,6 +1411,28 @@ class MainWindow(QMainWindow):
         audio.unload()
         self._show_render_progress(sound.name)
         worker = CtrPreviewWorker(key, archive, sound, self.settings['rate'])
+        worker.done.connect(self._ctr_preview_done)
+        worker.failed.connect(self._preview_failed)
+        self._preview_worker = worker
+        self._preview_key = key
+        worker.start()
+
+    def _play_dse(self, archive, sk, entry):
+        """Play a DSE sequence: cached render or full render in a worker."""
+        key = self._dse_cache_key(sk, entry)
+        cached = self._cache.get(key)
+        if cached is not None:
+            self._cancel_preview()
+            self._show_render(cached)
+            if cached.audio is not None and len(cached.audio):
+                self._play(key, cached)
+            else:
+                self.statusBar().showMessage(f'{cached.name}: {cached.status} ({cached.error})' if cached.error else '')
+            return
+        self._cancel_preview()
+        audio.unload()
+        self._show_render_progress(entry.name)
+        worker = DsePreviewWorker(key, archive, entry)
         worker.done.connect(self._ctr_preview_done)
         worker.failed.connect(self._preview_failed)
         self._preview_worker = worker
@@ -1340,7 +1558,7 @@ class MainWindow(QMainWindow):
                 per_sdat[sk] = {'whole': set(), 'partial': {}, 'seq': set(), 'all_seqs': False}
             p = per_sdat[sk]
             kind = it.data(0, ROLE_KIND)
-            if kind == 'arc' or kind == 'cstrmcat':
+            if kind == 'arc' or kind == 'cstrmcat' or kind == 'dseqcat':
                 p['whole'].add(it.data(0, ROLE_ARC))
             elif kind == 'carc':
                 arc = it.data(0, ROLE_ARC)
@@ -1348,7 +1566,7 @@ class MainWindow(QMainWindow):
                 kfilter = it.data(0, ROLE_KFILTER)
                 idxs = {s.index for s in sdat.folders[arc] if s.kind == kfilter}
                 p['partial'].setdefault(arc, set()).update(idxs)
-            elif kind in ('entry', 'centry'):
+            elif kind in ('entry', 'centry', 'dseq'):
                 arc = it.data(0, ROLE_ARC)
                 p['partial'].setdefault(arc, set()).add(it.data(0, ROLE_INDEX))
             elif kind == 'seq':
@@ -1357,8 +1575,9 @@ class MainWindow(QMainWindow):
                 p['all_seqs'] = True
         jobs = []
         for sk, p in per_sdat.items():
-            # 3DS folders are keyed by name, DS archives by id
-            arc_kind = 'carc' if isinstance(self._sdats[sk][1], CtrArchive) else 'arc'
+            # 3DS/DSE folders are keyed by name, DS archives by id
+            obj = self._sdats[sk][1]
+            arc_kind = 'dse' if isinstance(obj, DseArchive) else ('carc' if isinstance(obj, CtrArchive) else 'arc')
             for a in sorted(p['whole']):
                 jobs.append((sk, arc_kind, a, None))
             for a, idxs in sorted(p['partial'].items()):
@@ -1383,6 +1602,10 @@ class MainWindow(QMainWindow):
     def export_all(self):
         jobs = []
         for sk, (_label, sdat) in self._sdats.items():
+            if isinstance(sdat, DseArchive):
+                for folder in sdat.folders:
+                    jobs.append((sk, 'dse', folder, None))
+                continue
             if isinstance(sdat, CtrArchive):
                 for folder in sdat.folders:
                     jobs.append((sk, 'carc', folder, None))

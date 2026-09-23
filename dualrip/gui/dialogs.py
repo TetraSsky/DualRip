@@ -214,7 +214,7 @@ class ExportDialog(QDialog):
             return len(sel) if sel is not None else len(self._all_seq_ids(sk))
         if sel is not None:
             return len(sel)
-        if kind == 'carc':
+        if kind == 'carc' or kind == 'dse':
             return len(sdat.folders[ident])
         return len(sdat.seqarc(ident).entries)
 
@@ -223,7 +223,7 @@ class ExportDialog(QDialog):
         for sk, kind, ident, sel in self._jobs:
             sdat = self._sdat(sk)
             sdat_label = self._sdats[sk][0]
-            if kind == 'carc':
+            if kind == 'carc' or kind == 'dse':
                 members = sdat.folders[ident]
                 if sel is None:
                     self.log.appendPlainText(f'[{sdat_label}] {ident} - all {len(members)} sounds')
@@ -244,9 +244,9 @@ class ExportDialog(QDialog):
             else:
                 seqarc = sdat.seqarc(ident)
                 if sel is None:
-                    self.log.appendPlainText(f'[{sdat_label}] {ident:03d} {seqarc.name} - all {len(seqarc.entries)} entries')
+                    self.log.appendPlainText(f'[{sdat_label}] {ident:03d} {seqarc.name} - all {len(seqarc.entries)} sounds')
                 else:
-                    self.log.appendPlainText(f'[{sdat_label}] {ident:03d} {seqarc.name} - {len(sel)} entries:')
+                    self.log.appendPlainText(f'[{sdat_label}] {ident:03d} {seqarc.name} - {len(sel)} sounds:')
                     for idx in sorted(sel):
                         self.log.appendPlainText(f'[{idx:3d}] {seqarc.entries[idx].name}')
         self.log.appendPlainText('')
