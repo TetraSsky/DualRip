@@ -101,18 +101,26 @@ def render_one(sdat, seqarc, entry, rate=44100, resolver=None):
     except Exception as exc: # keep ripping the rest of the archive
         return RenderResult(entry.index, entry.name, 'error', str(entry.bank_id), error=str(exc))
 
-def _manifest_row(index, res, entry_volume):
-    """One manifest.csv row shared by the SSAR and SSEQ writers."""
+def _peak(res):
+    """Highest absolute sample value of a render, 0 when it kept no audio."""
+    if res.audio is None or not len(res.audio):
+        return 0
+    return int(np.abs(res.audio.astype(np.int32)).max())
+
+def manifest_row(index, res, kind='', bank='', entry_volume=None, peak=0):
+    """One manifest.csv row, shared by the SSAR, SSEQ, CSAR and DSE rippers."""
     return [
         index,
         res.name,
-        res.bank_label,
+        kind,
+        bank,
         '' if entry_volume is None else entry_volume,
         (
             round(res.duration, 3)
             if res.status in ('ok', 'loop')
             else (0.0 if res.status == 'empty' else '')
         ),
+        peak if res.status != 'error' else '',
         round(res.loop_start, 3) if res.loop_start is not None else '',
         round(res.loop_end, 3) if res.loop_end is not None else '',
         res.status if res.status != 'error' else f'ERROR: {res.error}',
@@ -121,9 +129,11 @@ def _manifest_row(index, res, entry_volume):
 MANIFEST_HEADER = [
     'index',
     'name',
+    'kind',
     'bank',
     'entry_volume',
     'duration_s',
+    'peak',
     'loop_start_s',
     'loop_end_s',
     'status',
@@ -160,7 +170,7 @@ def rip_sequences(
             if res.loop_start is not None:
                 marks = (round(res.loop_start * rate), round(res.loop_end * rate))
             write_wav(os.path.join(out_dir, fn), res.audio, rate, loop=marks)
-        manifest.append(_manifest_row(sid, res, entry.volume))
+        manifest.append(manifest_row(sid, res, 'seq', res.bank_label, entry.volume, _peak(res)))
         res.audio = None # free memory during long batches
         if progress is not None:
             progress(done, len(seq_ids), res)
@@ -213,7 +223,7 @@ def rip_archive(
             if res.loop_start is not None:
                 marks = (round(res.loop_start * rate), round(res.loop_end * rate))
             write_wav(os.path.join(out_dir, fn), res.audio, rate, loop=marks)
-        manifest.append(_manifest_row(entry.index, res, entry.volume))
+        manifest.append(manifest_row(entry.index, res, 'sfx', res.bank_label, entry.volume, _peak(res)))
         res.audio = None # free memory during long batches
         if progress is not None:
             progress(done, len(todo), res)
@@ -259,7 +269,10 @@ def render_ctr_one(archive, sound, rate, keep_audio=True):
     res = RenderResult(sound.index, sound.name, status, KIND_LABEL[sound.kind], n / native_rate if n else 0.0, ls, le, _ctr_chans_to_stereo(chans) if keep_audio else None, rate=native_rate,)
     return res, chans, native_rate, loop
 
-CTR_MANIFEST_HEADER = ['index', 'name', 'kind', 'duration_s', 'peak', 'loop_start_s', 'loop_end_s', 'status']
+def _ctr_bank_cell(sound):
+    """Bank ids a CSAR sound references, empty when it references none."""
+    ids = [b for b in getattr(sound, 'bank_ids', []) if b != 0xFFFFFF]
+    return ', '.join(str(b) for b in ids)
 
 def rip_ctr_folder(
     archive,
@@ -290,14 +303,9 @@ def rip_ctr_folder(
             fn = sanitize(sound.name) + '.wav'
             cstm.write_wav(os.path.join(out_dir, fn), chans, native_rate, loop)
         peak = max((abs(x) for ch in (chans or []) for x in ch), default=0)
-        manifest.append([
-            sound.index, res.name, KIND_LABEL[sound.kind],
-            round(res.duration, 3) if res.status != 'error' else '',
-            peak if res.status != 'error' else '',
-            round(res.loop_start, 3) if res.loop_start is not None else '',
-            round(res.loop_end, 3) if res.loop_end is not None else '',
-            res.status if res.status != 'error' else f'ERROR: {res.error}',
-        ])
+        manifest.append(manifest_row(
+            sound.index, res, KIND_LABEL[sound.kind], _ctr_bank_cell(sound),
+            sound.volume, peak))
         if progress is not None:
             progress(done, len(todo), res)
         if should_cancel is not None and should_cancel():
@@ -306,7 +314,7 @@ def rip_ctr_folder(
 
     with open(os.path.join(out_dir, 'manifest.csv'), 'w', newline='', encoding='utf-8') as f:
         w = csv.writer(f)
-        w.writerow(CTR_MANIFEST_HEADER)
+        w.writerow(MANIFEST_HEADER)
         w.writerows(manifest)
 
     note = None
@@ -325,3 +333,54 @@ def rip_ctr_folder(
         'total': len(todo),
         **counts,
     }
+
+def render_dse_one(archive, entry, rate, keep_audio=True):
+    """Render one DSE sound in memory. Streams carry their own native rate and loop information."""
+    from .formats.dse import KIND_LABEL
+    try:
+        audio, out_rate, loop = archive.render(entry, rate)
+    except (LookupError, ValueError, KeyError, IndexError, NotImplementedError) as exc:
+        return RenderResult(entry.index, entry.name, 'error', error=str(exc)), None, None, None
+    n = len(audio)
+    peak = int(np.abs(audio.astype(np.int32)).max()) if n else 0
+    ls = loop[0] / out_rate if loop else None
+    le = loop[1] / out_rate if loop else None
+    status = 'empty' if (n == 0 or peak == 0) else ('loop' if loop else 'ok')
+    res = RenderResult(entry.index, entry.name, status, KIND_LABEL[entry.kind], n / out_rate if n else 0.0, ls, le, audio if keep_audio else None, rate=out_rate)
+    return res, audio, out_rate, loop
+
+def rip_dse_folder(archive, folder, out_root, rate=32728, only=None, progress=None, should_cancel=None):
+    """Rip one folder of DSE sounds to WAV and manifest.csv."""
+    members = archive.folders[folder]
+    todo = [s for s in members if only is None or s.index in only]
+    out_dir = os.path.join(out_root, sanitize(folder))
+    os.makedirs(out_dir, exist_ok=True)
+
+    manifest = []
+    counts = {'ok': 0, 'loop': 0, 'empty': 0, 'null': 0, 'error': 0}
+    cancelled = False
+    seen = set() # two ROM members can share a name, keep both files
+    for done, entry in enumerate(todo, 1):
+        res, audio, out_rate, loop = render_dse_one(archive, entry, rate, keep_audio=False)
+        counts[res.status] += 1
+        if res.status != 'error':
+            name = sanitize(entry.name)
+            if name in seen:
+                name = '%s_%d' % (name, entry.index)
+            seen.add(name)
+            write_wav(os.path.join(out_dir, name + '.wav'), audio, out_rate, loop)
+        peak = int(np.abs(audio.astype(np.int32)).max()) if audio is not None and len(audio) else 0
+        manifest.append(manifest_row(
+            entry.index, res, entry.kind, entry.bank_name or '', None, peak))
+        if progress is not None:
+            progress(done, len(todo), res)
+        if should_cancel is not None and should_cancel():
+            cancelled = True
+            break
+
+    with open(os.path.join(out_dir, 'manifest.csv'), 'w', newline='', encoding='utf-8') as f:
+        w = csv.writer(f)
+        w.writerow(MANIFEST_HEADER)
+        w.writerows(manifest)
+
+    return {'arc_id': folder, 'arc_name': folder, 'out_dir': out_dir, 'note': None, 'cancelled': cancelled, 'total': len(todo), **counts}

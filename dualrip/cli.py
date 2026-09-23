@@ -6,7 +6,7 @@ import sys
 from . import __version__
 from .bankmap import parse_bank_map
 from .export import rip_archive, rip_ctr_folder, rip_sequences
-from .formats.ctr import Boot9RequiredError, find_csars_in_rom, open_bcsar
+from .formats.ctr import Boot9RequiredError, open_ctr_rom, open_bcsar
 from .formats.sdat import SdatFile, find_sdats_in_rom
 
 def _print_summary(summary, note_hint=''):
@@ -45,7 +45,7 @@ def _run_nds(args):
             print(f'{os.path.basename(args.file)} contains {len(sdats)} SDAT files. Use --archive-index to pick one:')
             for i, s in enumerate(sdats):
                 size_kb = s['size'] / 1024
-                print(f'[{i}] {size_kb:.0f} KB — {s["seqarcs"]} SSAR, {s["sseqs"]} SSEQ, {s["banks"]} banks, {s["swars"]} SWAR')
+                print(f'[{i}] {size_kb:.0f} KB — {s["seqarcs"]} SSAR, {s["sseqs"]} SSEQ, {s["banks"]} SBNK, {s["swars"]} SWAR')
             return 1
         label = os.path.basename(args.file)
         if len(sdats) > 1:
@@ -57,7 +57,7 @@ def _run_nds(args):
 
     if args.list:
         for i, name, count in sdat.seqarc_list:
-            print(f'[{i:3d}] {name}  ({count} entries)')
+            print(f'[{i:3d}] {name}  ({count} sounds)')
         if sdat.sequence_list:
             print(f'SSEQ (music): {len(sdat.sequence_list)} sequences')
         return 0
@@ -78,7 +78,7 @@ def _run_nds(args):
     only = set(args.only) if args.only else None
     for arc_id in arc_ids:
         seqarc = sdat.seqarc(arc_id)
-        print(f'=== {seqarc.name}: {len(seqarc.entries)} entries')
+        print(f'=== {seqarc.name}: {len(seqarc.entries)} sounds')
         _print_summary(
             rip_archive(
                 sdat,
@@ -115,7 +115,7 @@ def _open_ctr(path, index, boot9=None):
     """Open a 3DS ROM or loose .bcsar, returns one CtrArchive or None."""
     if path.lower().endswith('.bcsar'):
         return open_bcsar(path)
-    archives = find_csars_in_rom(path, boot9=boot9)
+    archives = open_ctr_rom(path, boot9=boot9)
     if index is not None:
         if not 0 <= index < len(archives):
             print(f'error: --archive-index {index} out of range (0-{len(archives)-1})')
@@ -126,7 +126,7 @@ def _open_ctr(path, index, boot9=None):
     print(f'{os.path.basename(path)} contains {len(archives)} CSAR sound archives. Use --archive-index to pick one:')
     for i, arch in enumerate(archives):
         c = arch.counts()
-        print(f'[{i}] {arch.label} — {c["seq"]} CSEQ, {c["wsd"]} CWSD, {c["strm"]} BCSTM, {len(arch.csar.banks)} CBNK, {len(arch.csar.wars)} CWAR')
+        print(f'[{i}] {arch.label} — {c["seq"]} CSEQ, {c["wsd"]} CWSD, {c["strm"]} BCSTM, {len(arch.banks)} CBNK, {len(arch.wars)} CWAR')
     return None
 
 def _run_ctr(args):
@@ -166,6 +166,32 @@ def _run_ctr(args):
         _print_summary(rip_ctr_folder(archive, folder, args.out, rate=args.rate, only=only, progress=_progress))
     return 0
 
+def _run_dse(args, archive):
+    from .export import rip_dse_folder
+
+    if args.list:
+        c = archive.counts()
+        print(f'{archive.label}: {len(archive.sounds)} sounds '
+              f'({c["seq"]} SMDL, {c["sfx"]} SEDL, {c["stream"]} SADL)')
+        for folder, members in archive.folders.items():
+            print(f'{folder}  ({len(members)} sounds)')
+        if archive.unresolved:
+            print(f'({len(archive.unresolved)} unresolved)')
+        return 0
+
+    rate = 32728 if args.rate == 44100 else args.rate # DSE native mixing rate
+    only = set(args.only) if args.only else None
+    folder_sel = args.folder or list(archive.folders)
+    unknown = [f for f in folder_sel if f not in archive.folders]
+    if unknown:
+        print(f'error: unknown folder(s): {", ".join(unknown)} (see --list)')
+        return 1
+    for folder in folder_sel:
+        members = archive.folders[folder]
+        print(f'=== {folder}: {len(members)} sounds')
+        _print_summary(rip_dse_folder(archive, folder, args.out, rate=rate, only=only, progress=_progress))
+    return 0
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         prog='dualrip',
@@ -187,6 +213,17 @@ def main(argv=None):
 
     if args.file.lower().endswith(('.cia', '.3ds', '.bcsar')):
         return _run_ctr(args)
+    if args.file.lower().endswith('.nds'):
+        # .nds holds either SDAT audio or DSE audio
+        try:
+            find_sdats_in_rom(args.file)
+        except ValueError:
+            from .formats.dse import open_dse_rom
+            archive = open_dse_rom(args.file)
+            if not archive.sounds:
+                print(f'no SDAT or DSE audio found in {os.path.basename(args.file)}')
+                return 1
+            return _run_dse(args, archive)
     return _run_nds(args)
 
 if __name__ == '__main__':
