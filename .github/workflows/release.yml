@@ -48,11 +48,13 @@ jobs:
           body: |
             ## DualRip ${{ github.ref_name }}
 
-            - Rips Nintendo DS (SSAR sound effects + SSEQ music) and Nintendo 3DS (CSAR sequence sounds, wave sounds and streams) audio to WAV (CLI + GUI).
+            - Nintendo DS: SDAT (SSAR sound effects + SSEQ music) or **DSE** audio from a `.nds` that holds no SDAT (SMDL music, SEDL sound effects, SADL streams), with a faithful port of the driver's synth (no MIDI, no SoundFont).
+            - Nintendo 3DS: CSAR (sequence sounds, wave sounds, streams) or ROMs whose audio is only loose `.bcstm` streams with no `.bcsar` at all.
             - DS: accepts `.sdat` files or `.nds` ROMs. 3DS: accepts `.cia`/`.3ds` ROMs or a loose `.bcsar`.
             - Decrypted 3DS images open with no setup; encrypted ones need a console boot ROM dump (`boot9.bin`) set in Settings (GUI) or `--boot9` (CLI).
             - For files holding several archives, pick several at once in the import dialog.
             - Raw export: steady-state loop (2 passes) for looping sequences, native rests kept, full release envelopes; loop points in manifest.csv and embedded in the WAV as a smpl chunk.
+            - manifest.csv has the same columns in every format (`index, name, kind, bank, entry_volume, duration_s, peak, loop_start_s, loop_end_s, status`).
             - NULL/dynamic bank slots resolved automatically per entry (--bank-map to override).
             - GUI: archive browser with filter and grouping, preview player (seek / pause / loop on the sound's own loop points), multi-select batch export with a live log.
 
