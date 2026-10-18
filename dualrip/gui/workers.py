@@ -9,10 +9,12 @@ from ..export import (
     RenderResult,
     render_ctr_one,
     render_dse_one,
+    render_strm_one,
     rip_archive,
     rip_ctr_folder,
     rip_dse_folder,
     rip_sequences,
+    rip_streams,
 )
 from . import audio
 
@@ -370,6 +372,33 @@ class DsePreviewWorker(_ThreadWorker):
             return
         self._emit(self.done, self._key, res)
 
+class StrmPreviewWorker(_ThreadWorker):
+    """In-memory decode of one SDAT streamed sound for preview."""
+
+    done = Signal(object, object)
+    failed = Signal(object, str)
+
+    def __init__(self, key, sdat, stream_id, name, parent=None):
+        super().__init__(parent)
+        self._key = key
+        self._sdat = sdat
+        self._stream_id = stream_id
+        self._name = name
+        self._cancel = threading.Event()
+
+    def cancel(self):
+        self._cancel.set()
+
+    def _run(self):
+        try:
+            res, _audio, _rate, _loop = render_strm_one(self._sdat, self._stream_id, self._name)
+        except Exception as exc:
+            self._emit(self.failed, self._key, str(exc))
+            return
+        if self._cancel.is_set():
+            return
+        self._emit(self.done, self._key, res)
+
 class BatchWorker(_ThreadWorker):
     """Rip a list of tagged jobs to disk with progress and cancellation."""
 
@@ -399,9 +428,16 @@ class BatchWorker(_ThreadWorker):
         sdat = self._sdat(sk)
         return [sid for sid, _n, _b in sdat.sequence_list]
 
+    def _strm_ids(self, sk, sel):
+        if sel is not None:
+            return sorted(sel)
+        return [sid for sid, _n, _v in self._sdat(sk).stream_list]
+
     def _job_size(self, sk, kind, ident, sel):
         if kind == 'seq':
             return len(self._seq_ids(sk, sel))
+        if kind == 'strm':
+            return len(self._strm_ids(sk, sel))
         if sel is not None:
             return len(sel)
         if kind == 'carc' or kind == 'dse':
@@ -451,6 +487,14 @@ class BatchWorker(_ThreadWorker):
                         self._out_root,
                         rate=self._rate,
                         override_map=self._override,
+                        progress=progress,
+                        should_cancel=self._cancel.is_set,
+                    )
+                elif kind == 'strm':
+                    summary = rip_streams(
+                        sdat,
+                        self._strm_ids(sk, sel),
+                        self._out_root,
                         progress=progress,
                         should_cancel=self._cancel.is_set,
                     )

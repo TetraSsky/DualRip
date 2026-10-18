@@ -29,6 +29,34 @@ def write_wav(path, stereo, rate, loop=None):
     with open(path, 'wb') as f:
         f.write(b'RIFF' + struct.pack('<I', 4 + len(payload)) + b'WAVE' + payload)
 
+def write_wav_channels(path, audio, rate, loop=None):
+    """RIFF writer for an (n, channels) array, keeping the source channel count."""
+    channels = audio.shape[1] if audio.ndim > 1 else 1
+    block = channels * 2
+    fmt = struct.pack('<HHIIHH', 1, channels, rate, rate * block, block, 16)
+    chunks = [(b'fmt ', fmt), (b'data', audio.tobytes())]
+    if loop is not None:
+        start, end = int(loop[0]), int(loop[1])
+        end = max(end - 1, start) # smpl dwEnd is the last sample included
+        smpl = struct.pack('<9I', 0, 0, 1000000000 // rate, 60, 0, 0, 0, 1, 0)
+        smpl += struct.pack('<6I', 0, 0, start, end, 0, 0)
+        chunks.append((b'smpl', smpl))
+    payload = b''
+    for cid, cdata in chunks:
+        payload += cid + struct.pack('<I', len(cdata)) + cdata
+        if len(cdata) & 1:
+            payload += b'\x00'
+    with open(path, 'wb') as f:
+        f.write(b'RIFF' + struct.pack('<I', 4 + len(payload)) + b'WAVE' + payload)
+
+def _to_stereo(audio):
+    """An (n, channels) array as stereo, mono duplicated to both sides."""
+    if audio.ndim == 1:
+        return np.column_stack((audio, audio))
+    if audio.shape[1] == 1:
+        return np.column_stack((audio[:, 0], audio[:, 0]))
+    return np.ascontiguousarray(audio[:, :2])
+
 def sanitize(name):
     return ''.join(c if c.isalnum() or c in '_-' else '_' for c in name)
 
@@ -331,6 +359,63 @@ def rip_ctr_folder(
         'note': note,
         'cancelled': cancelled,
         'total': len(todo),
+        **counts,
+    }
+
+def render_strm_one(sdat, stream_id, name, keep_audio=True):
+    """Render one SDAT streamed sound in memory, at its own encoded rate."""
+    try:
+        strm = sdat.stream(stream_id)
+        audio = strm.decode()
+    except (LookupError, ValueError, IndexError, NotImplementedError) as exc:
+        return RenderResult(stream_id, name, 'error', error=str(exc)), None, None, None
+    native_rate = strm.sample_rate
+    loop = strm.loop_points()
+    n = len(audio)
+    peak = int(np.abs(audio.astype(np.int32)).max()) if n else 0
+    ls = loop[0] / native_rate if loop else None
+    le = loop[1] / native_rate if loop else None
+    status = 'empty' if (n == 0 or peak == 0) else ('loop' if loop else 'ok')
+    res = RenderResult(stream_id, name, status, 'strm', n / native_rate if n else 0.0, ls, le, _to_stereo(audio) if keep_audio else None, rate=native_rate)
+    return res, audio, native_rate, loop
+
+def rip_streams(sdat, stream_ids, out_root, progress=None, should_cancel=None):
+    """Rip SDAT streamed sounds to WAV and manifest.csv, each at its native rate."""
+    out_dir = os.path.join(out_root, 'STRM')
+    os.makedirs(out_dir, exist_ok=True)
+    names = {i: n for i, n, _v in sdat.stream_list}
+    volumes = {i: v for i, _n, v in sdat.stream_list}
+
+    manifest = []
+    counts = {'ok': 0, 'loop': 0, 'empty': 0, 'null': 0, 'error': 0}
+    cancelled = False
+    for done, sid in enumerate(stream_ids, 1):
+        name = names.get(sid, f'STRM_{sid}')
+        res, audio, native_rate, loop = render_strm_one(sdat, sid, name)
+        counts[res.status] += 1
+        if res.status != 'error':
+            fn = f'{sid:03d}_{sanitize(name)}.wav'
+            write_wav_channels(os.path.join(out_dir, fn), audio, native_rate, loop)
+        manifest.append(manifest_row(sid, res, 'strm', '', volumes.get(sid), _peak(res)))
+        res.audio = None # free memory during long batches
+        if progress is not None:
+            progress(done, len(stream_ids), res)
+        if should_cancel is not None and should_cancel():
+            cancelled = True
+            break
+
+    with open(os.path.join(out_dir, 'manifest.csv'), 'w', newline='', encoding='utf-8') as f:
+        w = csv.writer(f)
+        w.writerow(MANIFEST_HEADER)
+        w.writerows(manifest)
+
+    return {
+        'arc_id': 'STRM',
+        'arc_name': 'STRM (streams)',
+        'out_dir': out_dir,
+        'note': None,
+        'cancelled': cancelled,
+        'total': len(stream_ids),
         **counts,
     }
 

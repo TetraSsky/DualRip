@@ -5,7 +5,7 @@ import os
 import sys
 from . import __version__
 from .bankmap import parse_bank_map
-from .export import rip_archive, rip_ctr_folder, rip_sequences
+from .export import rip_archive, rip_ctr_folder, rip_sequences, rip_streams
 from .formats.ctr import Boot9RequiredError, open_ctr_rom, open_bcsar
 from .formats.sdat import SdatFile, find_sdats_in_rom
 
@@ -60,12 +60,14 @@ def _run_nds(args):
             print(f'[{i:3d}] {name}  ({count} sounds)')
         if sdat.sequence_list:
             print(f'SSEQ (music): {len(sdat.sequence_list)} sequences')
+        if sdat.stream_list:
+            print(f'STRM (streams): {len(sdat.stream_list)} sounds')
         return 0
 
     override = parse_bank_map(args.bank_map)
 
     archive_sel = args.archive
-    if archive_sel is None and args.sequence is None:
+    if archive_sel is None and args.sequence is None and args.stream is None:
         archive_sel = 'all'
 
     if archive_sel == 'all':
@@ -109,6 +111,14 @@ def _run_nds(args):
             ),
             note_hint=' (--bank-map overrides this)',
         )
+
+    if args.stream is not None:
+        if len(args.stream) == 1 and args.stream[0] == 'all':
+            stream_ids = [sid for sid, _n, _v in sdat.stream_list]
+        else:
+            stream_ids = [int(x) for x in args.stream]
+        print(f'=== STRM (streams): {len(stream_ids)} sounds')
+        _print_summary(rip_streams(sdat, stream_ids, args.out, progress=_progress))
     return 0
 
 def _open_ctr(path, index, boot9=None):
@@ -201,6 +211,7 @@ def main(argv=None):
     ap.add_argument('--archive-index', type=int, default=None, metavar='N', help='index of the SDAT/CSAR inside a multi-archive file (0=first). If omitted and there are several, they are listed and the program exits.',)
     ap.add_argument('--archive', default=None, help='NDS: SSAR index, or "all" (sound effects). Default "all" when --sequence is not given',)
     ap.add_argument('--sequence', nargs='+', default=None, metavar='N', help='NDS: SSEQ indices, or "all" (music). Extracts music into an SSEQ/ subfolder',)
+    ap.add_argument('--stream', nargs='+', default=None, metavar='N', help='NDS: STRM indices, or "all" (streamed audio). Extracts into a STRM/ subfolder at each stream native rate',)
     ap.add_argument('--folder', nargs='+', default=None, metavar='NAME', help='3DS: CSAR folder name(s) (see --list), or "all" (default)',)
     ap.add_argument('--list', action='store_true', help='list archives/folders and exit without ripping')
     ap.add_argument('--out', default='DualRip_out', help='output directory')

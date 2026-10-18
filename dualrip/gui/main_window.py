@@ -46,7 +46,7 @@ from .dialogs import (
     save_recent_files,
 )
 from .player import PlayerBar
-from .workers import DSE_RATE, CtrPreviewWorker, DsePreviewWorker, LiveWorker, StreamWorker
+from .workers import DSE_RATE, CtrPreviewWorker, DsePreviewWorker, LiveWorker, StreamWorker, StrmPreviewWorker
 
 CACHE_SIZE = 48
 CACHE_MAX_BYTES = 256 * 1024 * 1024
@@ -627,12 +627,15 @@ class MainWindow(QMainWindow):
                 continue
             n_arcs = len(sdat.seqarc_list)
             n_sseq = len(sdat.sequence_list)
+            n_strm = len(sdat.stream_list)
             n_banks = sdat.num_banks
             n_swar = len(sdat.wave_archive_list)
             total_entries = sum(c for _i, _n, c in sdat.seqarc_list)
             info_parts = [f'{n_arcs} SSAR, {total_entries} entries']
             if n_sseq:
                 info_parts.append(f'{n_sseq} SSEQ')
+            if n_strm:
+                info_parts.append(f'{n_strm} STRM')
             info_parts.append(f'{n_banks} SBNK, {n_swar} SWAR')
             info = ', '.join(info_parts)
 
@@ -691,6 +694,21 @@ class MainWindow(QMainWindow):
                 self._item_index[(sdat_key, ('SSEQ', sid), sid)] = it
                 cat_seq.addChild(it)
             sdat_root.addChild(cat_seq)
+
+            # --- Streams (STRM) ---
+            streams = sdat.stream_list
+            if streams:
+                cat_strm = QTreeWidgetItem(['Streams (STRM)', '', f'{len(streams)}'])
+                cat_strm.setData(0, ROLE_KIND, 'strmcat')
+                _set_sdat(cat_strm)
+                for sid, name, _vol in streams:
+                    it = QTreeWidgetItem([name, str(sid), ''])
+                    it.setData(0, ROLE_KIND, 'strm')
+                    it.setData(0, ROLE_INDEX, sid)
+                    _set_sdat(it)
+                    self._item_index[(sdat_key, 'strm', sid)] = it
+                    cat_strm.addChild(it)
+                sdat_root.addChild(cat_strm)
 
             # --- Banks (SBNK) ---
             banks = sdat.bank_list
@@ -1002,6 +1020,19 @@ class MainWindow(QMainWindow):
             return sdat, self._sdat_key_for(it), seqarc, seqarc.entries[0]
         return None, None, None, None
 
+    def _current_stream(self):
+        """(sdat, sdat_key, stream_id, name) for the current STRM item, or Nones."""
+        it = self.tree.currentItem()
+        if it is None or not self._sdats or it.data(0, ROLE_KIND) != 'strm':
+            return None, None, None, None
+        sdat = self._sdat_for(it)
+        if sdat is None:
+            return None, None, None, None
+        return sdat, self._sdat_key_for(it), it.data(0, ROLE_INDEX), it.text(0)
+
+    def _strm_cache_key(self, sk, stream_id):
+        return (self._generation, sk, 'strm', stream_id)
+
     def _current_ctr_sound(self):
         """(archive, sdat_key, sound) for the current 3DS item, or Nones."""
         it = self.tree.currentItem()
@@ -1037,6 +1068,9 @@ class MainWindow(QMainWindow):
         _arch, sk, dentry = self._current_dse_sound()
         if dentry is not None:
             return self._dse_cache_key(sk, dentry)
+        _sd, sk, stream_id, _nm = self._current_stream()
+        if stream_id is not None:
+            return self._strm_cache_key(sk, stream_id)
         return None
 
     def _selection_changed(self, *_):
@@ -1045,7 +1079,7 @@ class MainWindow(QMainWindow):
             return
         sdat = self._sdat_for(it)
         kind = it.data(0, ROLE_KIND)
-        self.player.setVisible(kind in ('entry', 'seq', 'centry', 'dseq'))
+        self.player.setVisible(kind in ('entry', 'seq', 'centry', 'dseq', 'strm'))
         for lbl in (
             self.lbl_bank,
             self.lbl_format,
@@ -1074,6 +1108,22 @@ class MainWindow(QMainWindow):
             self.lbl_bank.setText(bank)
             self.lbl_volume.setText(str(entry.volume))
             self._show_render(self._cache.get(self._cache_key(sk, seqarc, entry)))
+        elif kind == 'strm':
+            _sd, sk, stream_id, name = self._current_stream()
+            self.lbl_name.setText(name)
+            self.lbl_kind.setText('Stream (STRM)')
+            self.lbl_where.setText(f'stream {stream_id}')
+            try:
+                strm = sdat.stream(stream_id)
+            except (LookupError, ValueError):
+                strm = None
+            if strm is not None:
+                self.lbl_format.setText(
+                    f'{strm.codec_name}, {strm.channels} ch, {strm.sample_rate} Hz')
+            vol = next((v for i, _n, v in sdat.stream_list if i == stream_id), None)
+            if vol is not None:
+                self.lbl_volume.setText(str(vol))
+            self._show_render(self._cache.get(self._strm_cache_key(sk, stream_id)))
         elif kind == 'centry':
             arch, sk, sound = self._current_ctr_sound()
             kl = arch.kind_label(sound)
@@ -1170,6 +1220,14 @@ class MainWindow(QMainWindow):
                 sk = self._sdat_key_for(it)
                 lbl = self._sdats[sk][0] if sk in self._sdats else ''
                 self.lbl_status.setText(f'from {lbl}' if lbl else 'select to export all music')
+        elif kind == 'strmcat':
+            self.lbl_name.setText('Streams (STRM)')
+            self.lbl_kind.setText('Stream collection')
+            self.lbl_where.setText(f'{it.text(2)} streams')
+            if sdat is not None:
+                sk = self._sdat_key_for(it)
+                lbl = self._sdats[sk][0] if sk in self._sdats else ''
+                self.lbl_status.setText(f'from {lbl}' if lbl else 'select to export all streams')
         elif kind == 'bank':
             if sdat is not None:
                 bid = it.data(0, ROLE_INDEX)
@@ -1362,6 +1420,10 @@ class MainWindow(QMainWindow):
         if dentry is not None:
             self._play_dse(darch, dsk, dentry)
             return
+        ssdat, ssk, stream_id, sname = self._current_stream()
+        if stream_id is not None:
+            self._play_stream(ssdat, ssk, stream_id, sname)
+            return
         sdat, sk, seqarc, entry = self._current_playable()
         if entry is None or sdat is None:
             return
@@ -1393,6 +1455,28 @@ class MainWindow(QMainWindow):
         self._preview_worker = worker
         self._preview_key = key
         self.player.begin_stream(key, self.settings['rate'])
+        worker.start()
+
+    def _play_stream(self, sdat, sk, stream_id, name):
+        """Play an SDAT streamed sound: cached decode or decode in a worker."""
+        key = self._strm_cache_key(sk, stream_id)
+        cached = self._cache.get(key)
+        if cached is not None:
+            self._cancel_preview()
+            self._show_render(cached)
+            if cached.audio is not None and len(cached.audio):
+                self._play(key, cached)
+            else:
+                self.statusBar().showMessage(f'{cached.name}: {cached.status} ({cached.error})' if cached.error else '')
+            return
+        self._cancel_preview()
+        audio.unload()
+        self._show_render_progress(name)
+        worker = StrmPreviewWorker(key, sdat, stream_id, name)
+        worker.done.connect(self._ctr_preview_done)
+        worker.failed.connect(self._preview_failed)
+        self._preview_worker = worker
+        self._preview_key = key
         worker.start()
 
     def _play_ctr(self, archive, sk, sound):
@@ -1555,7 +1639,7 @@ class MainWindow(QMainWindow):
             if sk is None:
                 continue
             if sk not in per_sdat:
-                per_sdat[sk] = {'whole': set(), 'partial': {}, 'seq': set(), 'all_seqs': False}
+                per_sdat[sk] = {'whole': set(), 'partial': {}, 'seq': set(), 'all_seqs': False, 'strm': set(), 'all_strms': False}
             p = per_sdat[sk]
             kind = it.data(0, ROLE_KIND)
             if kind == 'arc' or kind == 'cstrmcat' or kind == 'dseqcat':
@@ -1573,6 +1657,10 @@ class MainWindow(QMainWindow):
                 p['seq'].add(it.data(0, ROLE_INDEX))
             elif kind == 'seqcat':
                 p['all_seqs'] = True
+            elif kind == 'strm':
+                p['strm'].add(it.data(0, ROLE_INDEX))
+            elif kind == 'strmcat':
+                p['all_strms'] = True
         jobs = []
         for sk, p in per_sdat.items():
             # 3DS/DSE folders are keyed by name, DS archives by id
@@ -1587,6 +1675,10 @@ class MainWindow(QMainWindow):
                 jobs.append((sk, 'seq', None, None))
             elif p['seq']:
                 jobs.append((sk, 'seq', None, p['seq']))
+            if p['all_strms']:
+                jobs.append((sk, 'strm', None, None))
+            elif p['strm']:
+                jobs.append((sk, 'strm', None, p['strm']))
         return jobs
 
     def export_selection(self):
@@ -1614,6 +1706,8 @@ class MainWindow(QMainWindow):
                 jobs.append((sk, 'arc', i, None))
             if sdat.sequence_list:
                 jobs.append((sk, 'seq', None, None))
+            if sdat.stream_list:
+                jobs.append((sk, 'strm', None, None))
         self._open_export(jobs)
 
     def _open_export(self, jobs):
