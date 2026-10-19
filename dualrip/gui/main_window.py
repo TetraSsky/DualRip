@@ -932,23 +932,29 @@ class MainWindow(QMainWindow):
     def _update_status_and_title(self):
         if not self._sdats:
             return
-        total_entries = 0
+        total_sounds = 0
         total_sseq = 0
+        total_strm = 0
         n_sdats = len(self._sdats)
         for _label, sdat in self._sdats.values():
             if isinstance(sdat, (CtrArchive, DseArchive)):
-                total_entries += len(sdat.sounds)
+                total_sounds += len(sdat.sounds)
                 continue
-            total_entries += sum(c for _i, _n, c in sdat.seqarc_list)
+            total_sounds += sum(c for _i, _n, c in sdat.seqarc_list)
             total_sseq += len(sdat.sequence_list)
+            total_strm += len(sdat.stream_list)
         base = os.path.basename(self._sdat_path or '')
         all_ctr = all(isinstance(o, (CtrArchive, DseArchive)) for _l, o in self._sdats.values())
         if all_ctr:
-            self.statusBar().showMessage(f'{base} - {total_entries} sounds.')
-        elif n_sdats == 1:
-            self.statusBar().showMessage(f'{base} - {total_entries} sounds, {total_sseq} music sequences.')
+            self.statusBar().showMessage(f'{base} - {total_sounds} sounds.')
         else:
-            self.statusBar().showMessage(f'{base} - {n_sdats} SDATs, {total_entries} sounds, {total_sseq} music sequences.')
+            parts = [f'{total_sounds} sounds']
+            if total_sseq:
+                parts.append(f'{total_sseq} music sequences')
+            if total_strm:
+                parts.append(f'{total_strm} streams')
+            head = f'{n_sdats} SDATs, ' if n_sdats > 1 else ''
+            self.statusBar().showMessage(f'{base} - {head}{", ".join(parts)}.')
         self.setWindowTitle(f'DualRip - {base}' if base else 'DualRip')
 
     def _apply_filter(self, text):

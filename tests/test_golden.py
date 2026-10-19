@@ -2,8 +2,8 @@
 Golden fidelity tests — any engine change that alters audio shows up here.
 
 NDS: requires DUALRIP_TEST_SDAT env var pointing to a real sound_data.sdat.
-3DS: requires DUALRIP_TEST_CTR env var pointing to a real 3DS ROM (.cia/.3ds)
-     or a loose .bcsar sound archive.
+3DS: requires DUALRIP_TEST_CTR env var pointing to a real 3DS ROM (.cia/.3ds) or a loose .bcsar sound archive.
+NDS streams: requires DUALRIP_TEST_STRM env var pointing to an SDAT or a ROM whose audio is streamed (STRM, IMA-ADPCM), and optionally DUALRIP_TEST_STRM_PCM8 for an archive streamed as PCM8.
 Each half skips independently when its env var is unset.
 """
 
@@ -118,3 +118,103 @@ def test_render_is_deterministic_ctr(archive):
     a, *_ = render_ctr_one(archive, sound, 44100)
     b, *_ = render_ctr_one(archive, sound, 44100)
     assert (a.audio == b.audio).all()
+
+
+# ---------------------------------------------------------------------------
+# NDS streams (SDAT: STRM)
+# ---------------------------------------------------------------------------
+
+STRM_FILE = os.environ.get('DUALRIP_TEST_STRM')
+STRM_PCM8_FILE = os.environ.get('DUALRIP_TEST_STRM_PCM8')
+
+# stream index -> sha256 of the int16 stereo PCM the preview plays
+GOLDEN_STRM = {
+    # covers: long stereo IMA-ADPCM stream, looped stream, short looped stream
+    0: '780ade597f3a1341e0107267071859d2a8a0803a27f601457a5f4df1a9983c7d',
+    1: 'f74e3bacd469360b10b7cdae85b6fbb52185f2ff495088aa4d84ac31afc2af94',
+    2: 'bc92385c0c6bde543d9b8a8934fbf0481eec43fa16eaeb42b95966e9ae9d66c4',
+}
+
+# stream index -> sha256, for an archive whose streams are PCM8
+GOLDEN_STRM_PCM8 = {
+    0: '2c89d187453647096ec80216a336db3c8aecc1eb46be1cc3fd96edc91290832c',
+    9: '2570cd7cd06f3dc7233232a35237c25ff221286625a5795088c7778a20ca2781',
+}
+
+
+def _strm_archive(path):
+    """SdatFile of a .sdat file, or of the first SDAT carrying streams"""
+    from dualrip import SdatFile
+
+    if path.lower().endswith('.sdat'):
+        return SdatFile(path)
+    from dualrip.formats.sdat.rom import find_sdats_in_rom
+
+    for found in find_sdats_in_rom(path):
+        sdat = SdatFile.from_bytes(found['data'], label=os.path.basename(path))
+        if sdat.stream_list:
+            return sdat
+    return None
+
+@pytest.fixture(scope='module')
+def strm_sdat():
+    if not STRM_FILE or not os.path.exists(STRM_FILE):
+        pytest.skip('DUALRIP_TEST_STRM not set')
+    sdat = _strm_archive(STRM_FILE)
+    assert sdat is not None, 'no SDAT with streams in DUALRIP_TEST_STRM'
+    return sdat
+
+@pytest.fixture(scope='module')
+def strm_pcm8_sdat():
+    if not STRM_PCM8_FILE or not os.path.exists(STRM_PCM8_FILE):
+        pytest.skip('DUALRIP_TEST_STRM_PCM8 not set')
+    sdat = _strm_archive(STRM_PCM8_FILE)
+    assert sdat is not None, 'no SDAT with streams in DUALRIP_TEST_STRM_PCM8'
+    return sdat
+
+@pytest.mark.parametrize('index', sorted(GOLDEN_STRM))
+def test_golden_stream(strm_sdat, index):
+    from dualrip.export import render_strm_one
+
+    name = dict((i, n) for i, n, _v in strm_sdat.stream_list)[index]
+    res, _audio, _rate, _loop = render_strm_one(strm_sdat, index, name)
+    assert res.status in ('ok', 'loop'), res.error
+    digest = hashlib.sha256(res.audio.tobytes()).hexdigest()
+    expected = GOLDEN_STRM[index]
+    if expected is None:
+        # first run: print the hash to pin in GOLDEN_STRM
+        print(f'\nGOLDEN_STRM[{index}] = {digest!r}')
+    else:
+        assert digest == expected
+
+@pytest.mark.parametrize('index', sorted(GOLDEN_STRM_PCM8))
+def test_golden_stream_pcm8(strm_pcm8_sdat, index):
+    from dualrip.export import render_strm_one
+
+    name = dict((i, n) for i, n, _v in strm_pcm8_sdat.stream_list)[index]
+    res, _audio, _rate, _loop = render_strm_one(strm_pcm8_sdat, index, name)
+    assert res.status in ('ok', 'loop'), res.error
+    digest = hashlib.sha256(res.audio.tobytes()).hexdigest()
+    expected = GOLDEN_STRM_PCM8[index]
+    if expected is None:
+        # first run: print the hash to pin in GOLDEN_STRM_PCM8
+        print(f'\nGOLDEN_STRM_PCM8[{index}] = {digest!r}')
+    else:
+        assert digest == expected
+
+@pytest.mark.parametrize('fixture_name', ('strm_sdat', 'strm_pcm8_sdat'))
+def test_stream_header_matches_decode(request, fixture_name):
+    """Declared sample count, channels and block arithmetic agree with the decode."""
+    sdat = request.getfixturevalue(fixture_name)
+    for sid, name, _vol in sdat.stream_list:
+        st = sdat.stream(sid)
+        audio = st.decode()
+        assert audio.shape == (st.num_samples, st.channels), name
+        assert st.num_samples == (
+            (st.num_blocks - 1) * st.block_samples + st.last_block_samples), name
+        if st.wave_type == 2:
+            assert (st.block_size - 4) * 2 == st.block_samples, name
+        elif st.wave_type == 0:
+            assert st.block_size == st.block_samples, name
+        else:
+            assert st.block_size == st.block_samples * 2, name
