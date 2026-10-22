@@ -82,6 +82,8 @@ REF_TBL_DIRECT = 0x6000
 REF_TBL_INDEX = 0x6001
 REF_TBL_RANGE = 0x6002
 
+CSEQ_FIN = 0xFF
+
 class VelRegion:
     """One velocity region of an instrument."""
     __slots__ = ('war_slot', 'wav_index', 'org_key', 'volume', 'pan', 'pitch', 'interp', 'attack', 'decay', 'sustain', 'hold', 'release')

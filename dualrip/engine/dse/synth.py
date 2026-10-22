@@ -144,7 +144,26 @@ class Voice:
             self.rel_at = self.epos
             self.rel_level = float(self._held_level(np.array([self.epos]))[0])
 
-def render(events, tpqn, ntrk, preset, bank, out_rate=32728, master=0.7, drain_held=False):
+def _count(stats, reason):
+    """Count one skipped note by reason, when a sink is given."""
+    if stats is not None:
+        stats[reason] = stats.get(reason, 0) + 1
+
+def _mute_reason(vel, split, program, track_vol, track_expr):
+    """Name the amplitude factor that silences a note."""
+    if vel == 0:
+        return 'zero velocity'
+    if split.volume == 0:
+        return 'split volume zero'
+    if program.volume == 0:
+        return 'preset volume zero'
+    if track_vol == 0:
+        return 'track volume zero'
+    if track_expr == 0:
+        return 'track expression zero'
+    return 'silent amplitude'
+
+def render(events, tpqn, ntrk, preset, bank, out_rate=32728, master=0.7, drain_held=False, stats=None):
     """Render a sequence of events to a stereo audio buffer."""
     prog = [0] * ntrk
     vol = [127] * ntrk
@@ -197,14 +216,18 @@ def render(events, tpqn, ntrk, preset, bank, out_rate=32728, master=0.7, drain_h
             _t, _k, tid, midi, vel = ev
             picked = pick_split(prog[tid], midi, vel)
             if picked is None:
+                _count(stats, 'program not in preset')
                 continue
             pr, sp = picked
             sample = bank.samples.get(sp.sample_id)
             if sample is None or sample.raw is None:
+                _count(stats, 'sample missing')
                 continue
             semitones = midi - sp.root_key # carries coarse+fine tuning
             amp = (vel / 127.0) * (sp.volume / 127.0 if sp.volume >= 0 else 1.0)
             amp *= (pr.volume / 127.0) * (vol[tid] / 127.0) * (expr[tid] / 127.0)
+            if amp <= 0.0:
+                _count(stats, _mute_reason(vel, sp, pr, vol[tid], expr[tid]))
             v = Voice(sample, sp, semitones, amp, pan[tid], out_rate)
             v.tid = tid
             key = (tid, midi)

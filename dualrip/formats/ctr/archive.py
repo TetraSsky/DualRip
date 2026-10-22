@@ -67,6 +67,16 @@ def open_bcsar(path):
                     ext_groups.append((os.path.splitext(nm)[0], f.read()))
     return CtrArchive(data, ext_groups, os.path.basename(path), csar_dir=csar_dir)
 
+def _counting_lookup(lookup, stats):
+    """Bank lookup wrapper counting note requests and rejections."""
+    def counted(bank_no, program, key, vel):
+        region = lookup(bank_no, program, key, vel)
+        stats['notes'] = stats.get('notes', 0) + 1
+        if region is None:
+            stats['rejected'] = stats.get('rejected', 0) + 1
+        return region
+    return counted
+
 class CtrArchive:
     """Parsed CSAR with group variants and a render context."""
 
@@ -208,8 +218,25 @@ class CtrArchive:
         with open(os.path.join(self._csar_dir, rel.replace('/', os.sep)), 'rb') as f:
             return f.read()
 
-    def render(self, s, rate):
-        """Render one sound to (native_rate, chans, loop)."""
+    def count_unused(self, members):
+        """Sounds whose sequence body holds nothing but its terminator."""
+        blobs = {}
+        unused = 0
+        for s in members:
+            if KIND_LABEL[s.kind] != 'seq':
+                continue
+            try:
+                if s.file_id not in blobs:
+                    blobs[s.file_id] = cseq.parse_cseq(self.ctx.file_bytes(s.file_id, 'seq'))[0]
+            except (LookupError, ValueError):
+                continue # ambiguous = leave the slot uncounted
+            blob = blobs[s.file_id]
+            if blob[s.start_offset:s.start_offset + 1] == bytes((cseq.CSEQ_FIN,)):
+                unused += 1
+        return unused
+
+    def render(self, s, rate, stats=None):
+        """Render one sound to (native_rate, chans, loop); stats collects silent-entry facts."""
         kind = KIND_LABEL[s.kind]
         if kind == 'strm':
             data = self._stream_bytes(s)
@@ -218,8 +245,13 @@ class CtrArchive:
             return info.sample_rate, chans, loop
         if kind == 'seq':
             blob, _labels = cseq.parse_cseq(self.ctx.file_bytes(s.file_id, 'seq'))
+            lookup = self.ctx.make_lookup(s.bank_ids)
+            if stats is not None:
+                # a sound can point at a bare fin: an entry point with no events
+                stats['body empty'] = 1 if blob[s.start_offset:s.start_offset + 1] == bytes((cseq.CSEQ_FIN,)) else 0
+                lookup = _counting_lookup(lookup, stats)
             chans, loop, unapplied = render_entry(
-                blob, s.start_offset, self.ctx.make_lookup(s.bank_ids), rate,
+                blob, s.start_offset, lookup, rate,
                 s.channel_prio or 64, base_vol=s.volume)
             for k, v in unapplied.items():
                 self.unapplied[k] = self.unapplied.get(k, 0) + v

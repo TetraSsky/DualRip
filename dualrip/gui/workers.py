@@ -4,6 +4,7 @@ import threading
 import time
 import numpy as np
 from PySide6.QtCore import QObject, Signal
+from ..bankmap import empty_reason
 from ..engine.sdat.render import LiveRenderer, render_entry_stream
 from ..export import (
     RenderResult,
@@ -102,10 +103,11 @@ class StreamWorker(_ThreadWorker):
         chunks = []
         looped = False
         marks = None
+        refusals = {}
         try:
             for item in render_entry_stream(
                 self._seqarc.blob, entry.offset, bank, wave_arc, entry.volume,
-                self._rate, player_prio=entry.cpr or 0, loop_passes=2,
+                self._rate, player_prio=entry.cpr or 0, loop_passes=2, refusals=refusals,
             ):
                 if self._cancel.is_set():
                     return
@@ -126,7 +128,7 @@ class StreamWorker(_ThreadWorker):
         full = np.concatenate(chunks) if chunks else np.zeros((0, 2), dtype=np.int16)
         peak = int(np.abs(full.astype(np.int32)).max()) if len(full) else 0
         if len(full) == 0 or peak == 0:
-            res = RenderResult(entry.index, entry.name, 'empty', label)
+            res = RenderResult(entry.index, entry.name, 'empty', label, reason=empty_reason(self._seqarc.blob, entry, refusals))
         else:
             ls = marks[0] / self._rate if marks else None
             le = marks[1] / self._rate if marks else None

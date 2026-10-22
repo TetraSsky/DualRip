@@ -4,7 +4,7 @@ import csv
 import os
 import struct
 import numpy as np
-from .bankmap import BankResolver
+from .bankmap import BankResolver, empty_reason
 from .engine.sdat.render import render_entry
 
 def write_wav(path, stereo, rate, loop=None):
@@ -74,6 +74,7 @@ class RenderResult:
         'audio',
         'error',
         'rate',
+        'reason',
     )
 
     def __init__(
@@ -88,6 +89,7 @@ class RenderResult:
         audio=None,
         error='',
         rate=None,
+        reason='',
     ):
         self.index = index
         self.name = name
@@ -99,6 +101,7 @@ class RenderResult:
         self.audio = audio # int16 stereo ndarray, or None
         self.error = error
         self.rate = rate # BCSTM rate (3DS Streams)
+        self.reason = reason # why an entry rendered empty (*if known)
 
 def render_one(sdat, seqarc, entry, rate=44100, resolver=None):
     """Render one entry in memory."""
@@ -110,10 +113,11 @@ def render_one(sdat, seqarc, entry, rate=44100, resolver=None):
         rbid = resolver.resolve(entry)
         label = str(entry.bank_id) if rbid == entry.bank_id else f'{entry.bank_id}->{rbid}'
         bank, wave_arc = sdat.bank(rbid)
-        audio, looped, marks = render_entry(seqarc.blob, entry.offset, bank, wave_arc, entry.volume, rate, player_prio=entry.cpr or 0, loop_passes=2)
+        refusals = {}
+        audio, looped, marks = render_entry(seqarc.blob, entry.offset, bank, wave_arc, entry.volume, rate, player_prio=entry.cpr or 0, loop_passes=2, refusals=refusals)
         peak = int(np.abs(audio.astype(np.int32)).max()) if len(audio) else 0
         if len(audio) == 0 or peak == 0:
-            return RenderResult(entry.index, entry.name, 'empty', label)
+            return RenderResult(entry.index, entry.name, 'empty', label, reason=empty_reason(seqarc.blob, entry, refusals))
         ls = marks[0] / rate if marks else None
         le = marks[1] / rate if marks else None
         return RenderResult(
@@ -282,11 +286,21 @@ def _ctr_chans_to_stereo(chans):
     right = np.asarray(chans[1], dtype=np.int16) if len(chans) > 1 else left
     return np.column_stack((left, right))
 
+def _ctr_empty_reason(stats):
+    """CSAR sound rendered empty because the bank rejected all notes (or had none)"""
+    if stats.get('body empty'):
+        return 'unused slot'
+    notes = stats.get('notes', 0)
+    if notes and notes == stats.get('rejected', 0):
+        return 'notes rejected by bank'
+    return ''
+
 def render_ctr_one(archive, sound, rate, keep_audio=True):
     """Render one CSAR sound in memory."""
     from .formats.ctr import KIND_LABEL
+    stats = {}
     try:
-        native_rate, chans, loop = archive.render(sound, rate)
+        native_rate, chans, loop = archive.render(sound, rate, stats)
     except (LookupError, ValueError, NotImplementedError) as exc:
         return (RenderResult(sound.index, sound.name, 'error', error=str(exc)), None, None, None)
     n = len(chans[0]) if chans else 0
@@ -294,7 +308,7 @@ def render_ctr_one(archive, sound, rate, keep_audio=True):
     ls = loop[0] / native_rate if loop else None
     le = loop[1] / native_rate if loop else None
     status = 'empty' if (n == 0 or peak == 0) else ('loop' if loop else 'ok')
-    res = RenderResult(sound.index, sound.name, status, KIND_LABEL[sound.kind], n / native_rate if n else 0.0, ls, le, _ctr_chans_to_stereo(chans) if keep_audio else None, rate=native_rate,)
+    res = RenderResult(sound.index, sound.name, status, KIND_LABEL[sound.kind], n / native_rate if n else 0.0, ls, le, _ctr_chans_to_stereo(chans) if keep_audio else None, rate=native_rate, reason=_ctr_empty_reason(stats) if status == 'empty' else '')
     return res, chans, native_rate, loop
 
 def _ctr_bank_cell(sound):
@@ -419,11 +433,20 @@ def rip_streams(sdat, stream_ids, out_root, progress=None, should_cancel=None):
         **counts,
     }
 
+def _dse_empty_reason(entry, stats):
+    """DSE sound rendered empty because the bank rejected all notes (or had none)"""
+    if stats:
+        return max(stats, key=stats.get)
+    if entry.events and not any(e[1] == 'on' for e in entry.events):
+        return 'no notes'
+    return ''
+
 def render_dse_one(archive, entry, rate, keep_audio=True):
     """Render one DSE sound in memory. Streams carry their own native rate and loop information."""
     from .formats.dse import KIND_LABEL
+    stats = {}
     try:
-        audio, out_rate, loop = archive.render(entry, rate)
+        audio, out_rate, loop = archive.render(entry, rate, stats)
     except (LookupError, ValueError, KeyError, IndexError, NotImplementedError) as exc:
         return RenderResult(entry.index, entry.name, 'error', error=str(exc)), None, None, None
     n = len(audio)
@@ -431,7 +454,7 @@ def render_dse_one(archive, entry, rate, keep_audio=True):
     ls = loop[0] / out_rate if loop else None
     le = loop[1] / out_rate if loop else None
     status = 'empty' if (n == 0 or peak == 0) else ('loop' if loop else 'ok')
-    res = RenderResult(entry.index, entry.name, status, KIND_LABEL[entry.kind], n / out_rate if n else 0.0, ls, le, audio if keep_audio else None, rate=out_rate)
+    res = RenderResult(entry.index, entry.name, status, KIND_LABEL[entry.kind], n / out_rate if n else 0.0, ls, le, audio if keep_audio else None, rate=out_rate, reason=_dse_empty_reason(entry, stats) if status == 'empty' else '')
     return res, audio, out_rate, loop
 
 def rip_dse_folder(archive, folder, out_root, rate=32728, only=None, progress=None, should_cancel=None):

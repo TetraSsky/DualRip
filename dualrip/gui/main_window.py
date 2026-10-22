@@ -33,7 +33,7 @@ try:
 except ImportError:
     QMediaDevices = None
 from .. import __version__
-from ..bankmap import BankResolver, parse_bank_map
+from ..bankmap import FIN_BYTE, BankResolver, parse_bank_map
 from ..formats.ctr import KIND_TITLE, CtrArchive, open_ctr_rom, open_bcsar
 from ..formats.dse import DseArchive, KIND_LABEL as DSE_KIND_LABEL, open_dse_rom
 from ..formats.sdat import SdatFile, find_sdats_in_rom
@@ -61,6 +61,10 @@ DSE_COLLECTION_NOUN = {'SEQ': 'sequences', 'SFX': 'effects', 'STRM': 'streams'}
 
 # CSAR sound kinds: noun used when a sound belongs to no sound set
 CTR_SOUND_NOUN = {'seq': 'sequence', 'wsd': 'wave', 'strm': 'stream'}
+
+def unused_suffix(count):
+    """Tree text suffix counting slots without data, empty when there are none."""
+    return f', {count} unused' if count else ''
 
 # --- layout constants ---
 FORM_HSPACING = 32
@@ -658,9 +662,12 @@ class MainWindow(QMainWindow):
                 top.setData(0, ROLE_ARC, arc_id)
                 _set_sdat(top)
                 playable = 0
+                unused = 0
                 for e in seqarc.entries:
                     if e.offset is None:
                         continue
+                    if seqarc.blob[e.offset:e.offset + 1] == FIN_BYTE:
+                        unused += 1
                     bank = str(e.bank_id)
                     if sdat.bank_is_null(e.bank_id):
                         bank += ' (auto)'
@@ -672,7 +679,7 @@ class MainWindow(QMainWindow):
                     self._item_index[(sdat_key, arc_id, e.index)] = it
                     top.addChild(it)
                     playable += 1
-                top.setText(2, f'{playable} entries')
+                top.setText(2, f'{playable} entries' + unused_suffix(unused))
                 cat_arcs.addChild(top)
             sdat_root.addChild(cat_arcs)
 
@@ -783,8 +790,9 @@ class MainWindow(QMainWindow):
             cat.setData(0, ROLE_SDAT, sdat_key)
             for folder, members in groups:
                 idx, setname = self._ctr_folder_parts(arch, folder)
+                unused = arch.count_unused(members) if kfilter == 'sequence' else 0
                 top = QTreeWidgetItem([setname, '' if idx is None else f'{idx:03d}',
-                                       f'{len(members)} entries'])
+                                       f'{len(members)} entries' + unused_suffix(unused)])
                 top.setData(0, ROLE_KIND, 'carc')
                 top.setData(0, ROLE_ARC, folder)
                 top.setData(0, ROLE_KFILTER, kfilter)
@@ -877,10 +885,14 @@ class MainWindow(QMainWindow):
             members = arch.folders.get(folder)
             if not members:
                 continue
+            unused = sum(1 for s in members if s.events is not None and not s.events)
             cat = QTreeWidgetItem([title, '', f'{len(members)}'])
             cat.setData(0, ROLE_KIND, 'dseqcat')
             cat.setData(0, ROLE_ARC, folder)
             cat.setData(0, ROLE_SDAT, sdat_key)
+            if unused:
+                # this category holds the entries itself, so its count carries the suffix
+                cat.setText(2, f'{len(members)}' + unused_suffix(unused))
             for s in members:
                 detail = '' if s.kind == 'stream' else f'bank {s.bank_name}'
                 it = QTreeWidgetItem([s.name, str(s.index), detail])
@@ -1168,7 +1180,8 @@ class MainWindow(QMainWindow):
             self.lbl_name.setText(it.text(0))
             folder = it.data(0, ROLE_ARC)
             self.lbl_kind.setText(DSE_COLLECTION_TITLE.get(folder, 'Sound collection'))
-            self.lbl_where.setText(f'{it.text(2)} {DSE_COLLECTION_NOUN.get(folder, "sounds")}')
+            count = it.text(2).split(',')[0] # the tree suffix counts unused slots
+            self.lbl_where.setText(f'{count} {DSE_COLLECTION_NOUN.get(folder, "sounds")}')
             self.lbl_status.setText(f'from {arch.label}')
         elif kind in ('dbank', 'dpre'):
             arch = self._sdat_for(it)
@@ -1303,7 +1316,8 @@ class MainWindow(QMainWindow):
             self.lbl_loop.setText(f'{res.loop_start:.3f}s - {res.loop_end:.3f}s')
         else:
             self.lbl_loop.setText('none')
-        self.lbl_status.setText(res.status + (f'({res.error})' if res.error else ''))
+        status = f'{res.status}, {res.reason}' if res.reason else res.status
+        self.lbl_status.setText(status + (f'({res.error})' if res.error else ''))
         if res.bank_label and '->' in res.bank_label:
             self.lbl_bank.setText(self.lbl_bank.text().split('(')[0] + f'(auto: {res.bank_label})')
 
@@ -1619,8 +1633,9 @@ class MainWindow(QMainWindow):
         if cur_entry is not None and self._cache_key(sk, cur_arc, cur_entry) == key:
             self._show_render(res)
             if res.audio is None:
+                why = f'{res.status}, {res.reason}' if res.reason else res.status
                 self.statusBar().showMessage(
-                    f'{res.name}: {res.status}'
+                    f'{res.name}: {why}'
                     + (f'({res.error})' if res.error else '')
                 )
             else:

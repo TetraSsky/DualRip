@@ -1,9 +1,10 @@
 """
 Golden fidelity tests — any engine change that alters audio shows up here.
 
-NDS: requires DUALRIP_TEST_SDAT env var pointing to a real sound_data.sdat.
+NDS: requires DUALRIP_TEST_SDAT env var pointing to a real sound_data.sdat, or to a ROM that carries one.
 3DS: requires DUALRIP_TEST_CTR env var pointing to a real 3DS ROM (.cia/.3ds) or a loose .bcsar sound archive.
 NDS streams: requires DUALRIP_TEST_STRM env var pointing to an SDAT or a ROM whose audio is streamed (STRM, IMA-ADPCM), and optionally DUALRIP_TEST_STRM_PCM8 for an archive streamed as PCM8.
+DSE: requires DUALRIP_TEST_DSE env var pointing to a ROM whose audio uses the DSE driver.
 Each half skips independently when its env var is unset.
 """
 
@@ -39,7 +40,13 @@ def sdat():
         pytest.skip('DUALRIP_TEST_SDAT not set')
     from dualrip import SdatFile
 
-    return SdatFile(SDAT)
+    if SDAT.lower().endswith('.sdat'):
+        return SdatFile(SDAT)
+    from dualrip.formats.sdat.rom import find_sdats_in_rom
+
+    found = find_sdats_in_rom(SDAT)
+    assert found, 'no SDAT inside DUALRIP_TEST_SDAT'
+    return SdatFile.from_bytes(found[0]['data'], label=os.path.basename(SDAT))
 
 @pytest.mark.parametrize('arc_id,index', sorted(GOLDEN))
 def test_golden_render(sdat, arc_id, index):
@@ -65,6 +72,24 @@ def test_render_is_deterministic(sdat):
     b = render_one(sdat, seqarc, seqarc.entries[0], 44100, r)
     assert (a.audio == b.audio).all()
 
+# (archive, entry) -> reason reported for a silent entry
+EMPTY_GOLDEN = {
+    (0, 0): 'unused slot',
+    (0, 11): 'unused slot',
+    (1, 247): 'unused slot',
+    (2, 130): 'no notes',
+    (1, 34): 'wave archive slot empty',
+    (2, 163): 'patch empty in bank',
+}
+
+@pytest.mark.parametrize('arc_id,index', sorted(EMPTY_GOLDEN))
+def test_empty_entry_reason(sdat, arc_id, index):
+    from dualrip import BankResolver, render_one
+
+    seqarc = sdat.seqarc(arc_id)
+    res = render_one(sdat, seqarc, seqarc.entries[index], 44100, BankResolver(sdat, seqarc))
+    assert res.status == 'empty'
+    assert res.reason == EMPTY_GOLDEN[(arc_id, index)]
 
 # ---------------------------------------------------------------------------
 # 3DS (CSAR: CSEQ + CWSD + BCSTM)
@@ -119,6 +144,22 @@ def test_render_is_deterministic_ctr(archive):
     b, *_ = render_ctr_one(archive, sound, 44100)
     assert (a.audio == b.audio).all()
 
+# sound name -> reason reported when it renders silent
+EMPTY_GOLDEN_CTR = {
+    'SE_KT_SLIP_NONE': 'unused slot',
+    'SE_KT_HORN_KOOPA': 'notes rejected by bank',
+}
+
+@pytest.mark.parametrize('name', sorted(EMPTY_GOLDEN_CTR))
+def test_empty_reason_ctr(archive, name):
+    from dualrip.export import render_ctr_one
+
+    sound = next((s for s in archive.sounds if s.name == name), None)
+    if sound is None:
+        pytest.skip(f'{name} not in this archive')
+    res, _chans, _rate, _loop = render_ctr_one(archive, sound, 16000, keep_audio=False)
+    assert res.status == 'empty'
+    assert res.reason == EMPTY_GOLDEN_CTR[name]
 
 # ---------------------------------------------------------------------------
 # NDS streams (SDAT: STRM)
@@ -218,3 +259,35 @@ def test_stream_header_matches_decode(request, fixture_name):
             assert st.block_size == st.block_samples, name
         else:
             assert st.block_size == st.block_samples * 2, name
+
+# ---------------------------------------------------------------------------
+# DSE (SMDL + SEDL + SADL)
+# ---------------------------------------------------------------------------
+
+DSE_FILE = os.environ.get('DUALRIP_TEST_DSE')
+
+# sound name -> reason reported when it renders silent
+EMPTY_GOLDEN_DSE = {
+    'GE_002_04': 'track expression zero',
+    'SI_100_06': 'sample missing',
+}
+
+@pytest.fixture(scope='module')
+def dse_archive():
+    if not DSE_FILE or not os.path.exists(DSE_FILE):
+        pytest.skip('DUALRIP_TEST_DSE not set')
+    from dualrip.formats.dse import open_dse_rom
+
+    return open_dse_rom(DSE_FILE)
+
+@pytest.mark.parametrize('name', sorted(EMPTY_GOLDEN_DSE))
+def test_empty_reason_dse(dse_archive, name):
+    """A silent DSE sound names its cause: a skipped note or a muted track."""
+    from dualrip.export import render_dse_one
+
+    entry = next((s for s in dse_archive.sounds if s.name == name), None)
+    if entry is None:
+        pytest.skip(f'{name} not in this archive')
+    res, _audio, _rate, _loop = render_dse_one(dse_archive, entry, 32728, keep_audio=False)
+    assert res.status == 'empty'
+    assert res.reason == EMPTY_GOLDEN_DSE[name]
