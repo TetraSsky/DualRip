@@ -110,6 +110,8 @@ def empty_reason(blob, entry, refusals):
         return max(refusals, key=refusals.get)
     if not sequence_has_notes(blob, entry.offset):
         return 'no notes'
+    if entry.volume == 0:
+        return 'entry volume zero'
     return ''
 
 def patch_playable(entries, slot_sizes, p):

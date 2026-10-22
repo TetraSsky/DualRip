@@ -148,6 +148,7 @@ def test_render_is_deterministic_ctr(archive):
 EMPTY_GOLDEN_CTR = {
     'SE_KT_SLIP_NONE': 'unused slot',
     'SE_KT_HORN_KOOPA': 'notes rejected by bank',
+    'SE_EN_KILLER_CANNON_MOVE': 'entry volume zero',
 }
 
 @pytest.mark.parametrize('name', sorted(EMPTY_GOLDEN_CTR))

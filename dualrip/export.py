@@ -286,13 +286,15 @@ def _ctr_chans_to_stereo(chans):
     right = np.asarray(chans[1], dtype=np.int16) if len(chans) > 1 else left
     return np.column_stack((left, right))
 
-def _ctr_empty_reason(stats):
-    """CSAR sound rendered empty because the bank rejected all notes (or had none)"""
+def _ctr_empty_reason(sound, stats):
+    """CSAR sound rendered empty: bank rejections, no notes, or a zero entry volume"""
     if stats.get('body empty'):
         return 'unused slot'
     notes = stats.get('notes', 0)
     if notes and notes == stats.get('rejected', 0):
         return 'notes rejected by bank'
+    if sound.volume == 0:
+        return 'entry volume zero'
     return ''
 
 def render_ctr_one(archive, sound, rate, keep_audio=True):
@@ -308,7 +310,7 @@ def render_ctr_one(archive, sound, rate, keep_audio=True):
     ls = loop[0] / native_rate if loop else None
     le = loop[1] / native_rate if loop else None
     status = 'empty' if (n == 0 or peak == 0) else ('loop' if loop else 'ok')
-    res = RenderResult(sound.index, sound.name, status, KIND_LABEL[sound.kind], n / native_rate if n else 0.0, ls, le, _ctr_chans_to_stereo(chans) if keep_audio else None, rate=native_rate, reason=_ctr_empty_reason(stats) if status == 'empty' else '')
+    res = RenderResult(sound.index, sound.name, status, KIND_LABEL[sound.kind], n / native_rate if n else 0.0, ls, le, _ctr_chans_to_stereo(chans) if keep_audio else None, rate=native_rate, reason=_ctr_empty_reason(sound, stats) if status == 'empty' else '')
     return res, chans, native_rate, loop
 
 def _ctr_bank_cell(sound):
