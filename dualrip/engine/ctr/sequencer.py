@@ -306,12 +306,12 @@ class CseqPlayer:
         v.vol_l = amp if pan <= 64 else amp * (127 - pan) / 63.0
         v.vol_r = amp if pan >= 64 else amp * pan / 64.0
 
-    def generate(self, n):
+    def generate(self, n, produce=True):
         """Mix n samples from all active voices, splitting over aux buses when effects are set."""
         fx = self.effects
-        out_l = [0.0] * n
-        out_r = [0.0] * n
-        aux = {k: ([0.0] * n, [0.0] * n) for k in fx}
+        out_l = [0.0] * n if produce else None
+        out_r = [0.0] * n if produce else None
+        aux = {k: ([0.0] * n, [0.0] * n) for k in fx} if produce else {}
         for v in self.voices:
             if v.state == CS_NONE or v.inc <= 0:
                 continue
@@ -322,6 +322,18 @@ class CseqPlayer:
             pos = v.pos
             inc = v.inc
             ls = v.loop_start
+            if not produce:
+                end = pos + inc * n
+                if end < ln:
+                    v.pos = end
+                    continue
+                span = ln - ls
+                if v.loop and not cut_at_wrap and span > 0:
+                    v.pos = ls + ((end - ln) % span)
+                    continue
+                v.dead_wrap = True
+                v.kill()
+                continue
             vl = v.vol_l
             vr = v.vol_r
             if fx:

@@ -46,7 +46,7 @@ from .dialogs import (
     save_recent_files,
 )
 from .player import PlayerBar
-from .workers import DSE_RATE, CtrPreviewWorker, DsePreviewWorker, LiveWorker, StreamWorker, StrmPreviewWorker
+from .workers import DSE_RATE, CtrLiveWorker, CtrPreviewWorker, DseLiveWorker, DsePreviewWorker, LiveWorker, StrmPreviewWorker
 
 CACHE_SIZE = 48
 CACHE_MAX_BYTES = 256 * 1024 * 1024
@@ -1450,7 +1450,7 @@ class MainWindow(QMainWindow):
         it = self.tree.currentItem()
         kind = it.data(0, ROLE_KIND) if it is not None else None
         key = self._cache_key(sk, seqarc, entry)
-        if kind == 'seq':
+        if kind in ('entry', 'seq'):
             if self.player.loaded_key == key and audio.is_live():
                 audio.request_seek(0)
                 self.player.resume()
@@ -1465,17 +1465,6 @@ class MainWindow(QMainWindow):
                 self._play(key, cached)
             else:
                 self.statusBar().showMessage(f'{cached.name}: {cached.status} ({cached.error})' if cached.error else '')
-            return
-        self._cancel_preview()
-        audio.unload()
-        self._show_render_progress(entry.name)
-        worker = StreamWorker(key, sdat, seqarc, entry, self.settings['rate'], self._resolver(sdat, sk, seqarc))
-        worker.done.connect(self._preview_done)
-        worker.failed.connect(self._preview_failed)
-        self._preview_worker = worker
-        self._preview_key = key
-        self.player.begin_stream(key, self.settings['rate'])
-        worker.start()
 
     def _play_stream(self, sdat, sk, stream_id, name):
         """Play an SDAT streamed sound: cached decode or decode in a worker."""
@@ -1500,8 +1489,15 @@ class MainWindow(QMainWindow):
         worker.start()
 
     def _play_ctr(self, archive, sk, sound):
-        """Play a 3DS CSAR sound: cached render or full render in a worker."""
+        """Play a 3DS CSAR sound: cached audio, seamless sequence preview, or one-shot render."""
         key = self._ctr_cache_key(sk, sound)
+        if archive.kind_label(sound) == 'seq':
+            if self.player.loaded_key == key and audio.is_live():
+                audio.request_seek(0)
+                self.player.resume()
+                return
+            self._play_ctr_live(archive, key, sound)
+            return
         cached = self._cache.get(key)
         if cached is not None:
             self._cancel_preview()
@@ -1521,9 +1517,44 @@ class MainWindow(QMainWindow):
         self._preview_key = key
         worker.start()
 
+    def _play_ctr_live(self, archive, key, sound):
+        """Start seamless 3DS sequence preview (CtrLiveWorker)."""
+        self._cancel_preview()
+        audio.unload()
+        self._show_render_progress(sound.name)
+        worker = CtrLiveWorker(key, archive, sound, self.settings['rate'])
+        worker.meta.connect(self._ctr_live_meta)
+        worker.failed.connect(self._preview_failed)
+        self._preview_worker = worker
+        self._preview_key = key
+        self.player.begin_live(key, self.settings['rate'])
+        worker.start()
+
+    def _ctr_live_meta(self, key, res):
+        """CtrLiveWorker reported exact length and loops."""
+        if key != self._preview_key:
+            return
+        self._hide_render_progress()
+        self._cache[key] = res
+        self._cache.move_to_end(key)
+        self._evict_cache()
+        if self._current_key() == key:
+            self._show_render(res)
+            if res.status in ('ok', 'loop'):
+                self.statusBar().showMessage(f'{res.name}: {res.duration:.2f}s')
+            else:
+                self.statusBar().showMessage(f'{res.name}: {res.status} ({res.error})' if res.error else '')
+
     def _play_dse(self, archive, sk, entry):
-        """Play a DSE sequence: cached render or full render in a worker."""
+        """Play a DSE sound: cached audio, seamless sequence preview, or one-shot decode."""
         key = self._dse_cache_key(sk, entry)
+        if entry.kind in ('seq', 'sfx'):
+            if self.player.loaded_key == key and audio.is_live():
+                audio.request_seek(0)
+                self.player.resume()
+                return
+            self._play_dse_live(archive, key, entry)
+            return
         cached = self._cache.get(key)
         if cached is not None:
             self._cancel_preview()
@@ -1542,6 +1573,34 @@ class MainWindow(QMainWindow):
         self._preview_worker = worker
         self._preview_key = key
         worker.start()
+
+    def _play_dse_live(self, archive, key, entry):
+        """Start seamless DSE sequence preview (DseLiveWorker)."""
+        self._cancel_preview()
+        audio.unload()
+        self._show_render_progress(entry.name)
+        worker = DseLiveWorker(key, archive, entry)
+        worker.meta.connect(self._dse_live_meta)
+        worker.failed.connect(self._preview_failed)
+        self._preview_worker = worker
+        self._preview_key = key
+        self.player.begin_live(key, DSE_RATE)
+        worker.start()
+
+    def _dse_live_meta(self, key, res):
+        """DseLiveWorker reported exact length."""
+        if key != self._preview_key:
+            return
+        self._hide_render_progress()
+        self._cache[key] = res
+        self._cache.move_to_end(key)
+        self._evict_cache()
+        if self._current_key() == key:
+            self._show_render(res)
+            if res.status in ('ok', 'loop'):
+                self.statusBar().showMessage(f'{res.name}: {res.duration:.2f}s')
+            else:
+                self.statusBar().showMessage(f'{res.name}: {res.status} ({res.error})' if res.error else '')
 
     def _ctr_preview_done(self, key, res):
         if key != self._preview_key:
@@ -1617,29 +1676,6 @@ class MainWindow(QMainWindow):
 
         while len(self._cache) > CACHE_SIZE or (len(self._cache) > 1 and total_bytes() > CACHE_MAX_BYTES):
             self._cache.popitem(last=False)
-
-    def _preview_done(self, key, res):
-        if key != self._preview_key:
-            return
-        self._hide_render_progress()
-        self._finish_preview_worker()
-        self._preview_key = None
-        if res.audio is None:
-            self.player.clear()
-        self._cache[key] = res
-        self._cache.move_to_end(key)
-        self._evict_cache()
-        _sd, sk, cur_arc, cur_entry = self._current_playable()
-        if cur_entry is not None and self._cache_key(sk, cur_arc, cur_entry) == key:
-            self._show_render(res)
-            if res.audio is None:
-                why = f'{res.status}, {res.reason}' if res.reason else res.status
-                self.statusBar().showMessage(
-                    f'{res.name}: {why}'
-                    + (f'({res.error})' if res.error else '')
-                )
-            else:
-                self.statusBar().showMessage(f'{res.name}: {res.duration:.2f}s')
 
     def _preview_failed(self, key, msg):
         if key != self._preview_key:

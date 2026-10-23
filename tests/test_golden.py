@@ -91,6 +91,50 @@ def test_empty_entry_reason(sdat, arc_id, index):
     assert res.status == 'empty'
     assert res.reason == EMPTY_GOLDEN[(arc_id, index)]
 
+def test_live_matches_batch_sdat(sdat):
+    """The live renderer yields exactly the one-shot render, and the racer agrees on the length."""
+    import numpy as np
+    from dualrip import BankResolver, render_one
+    from dualrip.engine.sdat.render import LiveRenderer
+
+    # a short effect keeps the test fast, the equality does not depend on the sound
+    seqarc = entry = resolver = None
+    for arc_id, _name, _count in sdat.seqarc_list:
+        candidate = sdat.seqarc(arc_id)
+        cand_resolver = BankResolver(sdat, candidate)
+        for e in candidate.entries[:40]:
+            if e.offset is None:
+                continue
+            probe = render_one(sdat, candidate, e, 44100, cand_resolver)
+            if probe.status in ('ok', 'loop') and 0 < probe.duration < 3.0:
+                seqarc, entry, resolver = candidate, e, cand_resolver
+                break
+        if entry is not None:
+            break
+    if entry is None:
+        pytest.skip('no short effect in this archive')
+    bank, wave_arc = sdat.bank(resolver.resolve(entry))
+
+    def renderer():
+        return LiveRenderer(seqarc.blob, entry.offset, bank, wave_arc, entry.volume, 44100,
+                            player_prio=entry.cpr or 0, loop_passes=2)
+
+    r = renderer()
+    parts = []
+    while not r.finished:
+        out = r.step(produce=True)
+        if out is not None:
+            parts.append(out)
+    live = np.concatenate(parts) if parts else np.zeros((0, 2), dtype=np.int16)
+    batch = render_one(sdat, seqarc, entry, 44100, resolver).audio
+    batch = batch if batch is not None else np.zeros((0, 2), dtype=np.int16)
+    assert live.shape == batch.shape
+    assert np.array_equal(live, batch)
+
+    racer = renderer()
+    racer.fast_forward_to(10 ** 9)
+    assert racer.emitted == len(batch)
+
 # ---------------------------------------------------------------------------
 # 3DS (CSAR: CSEQ + CWSD + BCSTM)
 # ---------------------------------------------------------------------------
@@ -161,6 +205,56 @@ def test_empty_reason_ctr(archive, name):
     res, _chans, _rate, _loop = render_ctr_one(archive, sound, 16000, keep_audio=False)
     assert res.status == 'empty'
     assert res.reason == EMPTY_GOLDEN_CTR[name]
+
+def test_live_matches_batch_ctr(archive):
+    """The live renderer matches the one-shot render, and resumes mid-stream exactly."""
+    import numpy as np
+    from dualrip.engine.ctr import LiveRenderer
+
+    seqs = [s for s in archive.sounds if archive.kind_label(s) == 'seq']
+    if not seqs:
+        pytest.skip('no sequence in this archive')
+    # effect sequences are short, which keeps the test fast
+    sound = next((s for s in seqs if s.name.startswith('SE_')), seqs[0])
+    rate = 8000 # low rate keeps the test short, the equality does not depend on it
+    blob = archive.sequence_blob(sound)
+    lookup = archive.sequence_lookup(sound)
+    prio, vol = sound.channel_prio or 64, sound.volume
+
+    def renderer():
+        return LiveRenderer(blob, sound.start_offset, lookup, rate, prio, base_vol=vol)
+
+    def run(target=None):
+        r = renderer()
+        if target is not None:
+            r.fast_forward_to(target)
+        start = r.emitted
+        parts = []
+        while not r.finished:
+            out = r.step(produce=True)
+            if out is not None:
+                parts.append(out)
+        audio = np.concatenate(parts) if parts else np.zeros((0, 2), dtype=np.int16)
+        return audio, r.loop_marks, start
+
+    _rate, chans, loop = archive.render(sound, rate)
+    batch = np.column_stack((np.asarray(chans[0], dtype=np.int16),
+                             np.asarray(chans[1], dtype=np.int16)))
+    live, marks, _start = run()
+    assert live.shape == batch.shape
+    assert np.array_equal(live, batch)
+    assert marks == loop
+
+    racer = renderer()
+    racer.fast_forward_to(10 ** 9)
+    assert racer.emitted == len(batch)
+    assert racer.loop_marks == loop
+
+    if len(batch) > 4000:
+        mid = len(batch) // 2
+        after, _marks, start = run(target=mid)
+        assert start >= mid
+        assert np.array_equal(after, batch[start:])
 
 # ---------------------------------------------------------------------------
 # NDS streams (SDAT: STRM)
@@ -292,3 +386,53 @@ def test_empty_reason_dse(dse_archive, name):
     res, _audio, _rate, _loop = render_dse_one(dse_archive, entry, 32728, keep_audio=False)
     assert res.status == 'empty'
     assert res.reason == EMPTY_GOLDEN_DSE[name]
+
+def test_live_matches_batch_dse(dse_archive):
+    """The DSE live renderer matches the one-shot render, and resumes mid-stream exactly."""
+    import numpy as np
+    from dualrip.engine.dse.synth import LiveRenderer
+    from dualrip.export import render_dse_one
+
+    rate = 32728
+    # effects are short, which keeps the test fast; the equality does not depend on the sound
+    entry = None
+    for cand in [s for s in dse_archive.sounds if s.kind == 'sfx' and s.events][:6]:
+        probe, _a, _r, _l = render_dse_one(dse_archive, cand, rate, keep_audio=False)
+        if probe.status == 'ok' and 0 < probe.duration < 6.0:
+            entry = cand
+            break
+    if entry is None:
+        pytest.skip('no short DSE effect in this archive')
+
+    def renderer():
+        return LiveRenderer(entry.events, entry.tpqn, entry.ntrk, entry.preset, entry.bank,
+                            rate, drain_held=entry.kind == 'sfx')
+
+    def run(target=None):
+        r = renderer()
+        if target is not None:
+            r.fast_forward_to(target)
+        start = r.emitted
+        parts = []
+        while not r.finished:
+            out = r.step(produce=True)
+            if out is not None:
+                parts.append(out)
+        audio = np.concatenate(parts) if parts else np.zeros((0, 2), dtype=np.int16)
+        return audio, start
+
+    _res, batch, _rate, _loop = render_dse_one(dse_archive, entry, rate)
+    batch = batch if batch is not None else np.zeros((0, 2), dtype=np.int16)
+    live, _start = run()
+    assert live.shape == batch.shape
+    assert np.array_equal(live, batch)
+
+    racer = renderer()
+    racer.fast_forward_to(10 ** 9)
+    assert racer.emitted == len(batch)
+
+    if len(batch) > 4000:
+        mid = len(batch) // 2
+        after, start = run(target=mid)
+        assert start >= mid
+        assert np.array_equal(after, batch[start:])

@@ -235,6 +235,14 @@ class CtrArchive:
                 unused += 1
         return unused
 
+    def sequence_blob(self, s):
+        """Parsed CSEQ events blob of one sequenced sound."""
+        return cseq.parse_cseq(self.ctx.file_bytes(s.file_id, 'seq'))[0]
+
+    def sequence_lookup(self, s):
+        """Bank lookup callback of one sequenced sound."""
+        return self.ctx.make_lookup(s.bank_ids)
+
     def render(self, s, rate, stats=None):
         """Render one sound to (native_rate, chans, loop); stats collects silent-entry facts."""
         kind = KIND_LABEL[s.kind]
