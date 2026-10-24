@@ -1,6 +1,21 @@
-# DualRip
+<div align="center">
+    <img src="icon.ico" alt="DualRip Logo" width="120">
+    <h1>DualRip</h1>
+    <p><strong>Rips Nintendo DS sound effects (SSAR) & music (SSEQ) from <code>sound_data.sdat</code>, and Nintendo 3DS sounds (CSEQ sequences, CWSD wave sounds, BCSTM streams) from CSAR archives, to WAV by emulating each console's sound driver.</strong></p>
+    <p><strong>CLI + GUI</strong></p>
+  
+[![Download](https://img.shields.io/github/v/release/tetrassky/dualrip?style=flat-square&logo=github&logoColor=white&label=Download)](https://github.com/TetraSsky/DualRip/releases)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-blue?style=flat-square&logo=python&logoColor=white&label=Python)](https://www.python.org/)
+[![NumPy](https://img.shields.io/badge/numpy-1.25%2B-blue?style=flat-square&logo=numpy&logoColor=white&label=NumPy)](https://pypi.org/project/numpy/)
+[![ndspy](https://img.shields.io/badge/ndspy-1.0%2B-blue?style=flat-square&logo=ndspy&logoColor=white&label=ndspy)](https://pypi.org/project/ndspy/)
+[![License](https://img.shields.io/badge/License-MIT-green?style=flat-square&logoColor=white&label=License)](LICENSE)
+[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey?style=flat-square&logoColor=white&label=Platform)](#)
+[![Status](https://img.shields.io/badge/Status-Active-success?style=flat-square&logoColor=white&label=Status)](#)
 
-Rips Nintendo DS sound effects (SSAR) & music (SSEQ) from `sound_data.sdat`, and Nintendo 3DS sounds (CSEQ sequences, CWSD wave sounds, BCSTM streams) from CSAR archives, to WAV by emulating each console's sound driver. CLI + GUI.
+[What you get](#what-you-get) · [Screenshots](#screenshots) · [Usage](#usage) · [Dynamic bank slots](#dynamic-bank-slots-nds) · [Credits](#credits) · [Code](#code) · [Requirements](#requirements) · [Build](#build)
+</div>
+
+<br>
 
 ## What you get
 
@@ -100,10 +115,14 @@ tests in `tests/test_golden.py` (`DUALRIP_TEST_SDAT` for the DS half,
 
 ## Requirements
 
-Python ≥ 3.10, `numpy`, `ndspy`, `pyctr`, `PySide6`, `sounddevice`. Decrypted
-`.cia`/`.3ds` files and loose `.bcsar` archives open with no extra requirement;
-an encrypted ROM additionally needs the console's boot ROM dump (`boot9.bin`),
-set in Settings (GUI) or passed with `--boot9` (CLI). No game data included.
+<a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.10%2B-blue?style=flat-square&logo=python&logoColor=white" alt="Python"></a>
+<a href="https://pypi.org/project/numpy/"><img src="https://img.shields.io/badge/numpy-1.25%2B-blue?style=flat-square&logo=numpy&logoColor=white" alt="NumPy"></a>
+<a href="https://pypi.org/project/ndspy/"><img src="https://img.shields.io/badge/ndspy-1.0%2B-blue?style=flat-square&logo=ndspy&logoColor=white" alt="ndspy"></a>
+<a href="https://pypi.org/project/pyctr/"><img src="https://img.shields.io/badge/pyctr-1.0%2B-blue?style=flat-square&logo=pyctr&logoColor=white" alt="pyctr"></a>
+<a href="https://pypi.org/project/PySide6/"><img src="https://img.shields.io/badge/PySide6-6.0%2B-blue?style=flat-square&logo=PySide6&logoColor=white" alt="PySide6"></a>
+<a href="https://pypi.org/project/sounddevice/"><img src="https://img.shields.io/badge/sounddevice-0.4%2B-blue?style=flat-square&logo=sounddevice&logoColor=white" alt="sounddevice"></a>
+
+Decrypted `.cia`/`.3ds` files and loose `.bcsar` archives open with no extra requirement an encrypted ROM additionally needs the console's boot ROM dump (`boot9.bin`), set in Settings (GUI) or passed with `--boot9` (CLI). No game data included.
 
 ## Build
 
@@ -112,8 +131,6 @@ pip install -e .[gui] pyinstaller
 pyinstaller dualrip.spec          # dualrip_linux.spec / dualrip_macos.spec elsewhere
 ```
 
-One-file build, bundles Python, PySide6 and the icon. `build_exe.bat` /
-`build_linux.sh` / `build_macos.sh` wrap the same command per platform.
-Linux needs `libportaudio2` and the Qt xcb libs installed on the build
-machine (see the `apt-get` step in `.github/workflows/release.yml`).
+One-file build, bundles Python, PySide6 and the icon. `build_exe.bat` / `build_linux.sh` / `build_macos.sh` wrap the same command per platform.
+Linux needs `libportaudio2` and the Qt xcb libs installed on the build machine (see the `apt-get` step in `.github/workflows/release.yml`).
 Pre-built binaries for Windows, Linux and macOS are available on the releases page.

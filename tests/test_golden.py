@@ -1,9 +1,10 @@
 """
 Golden fidelity tests — any engine change that alters audio shows up here.
 
-NDS: requires DUALRIP_TEST_SDAT env var pointing to a real sound_data.sdat.
-3DS: requires DUALRIP_TEST_CTR env var pointing to a real 3DS ROM (.cia/.3ds)
-     or a loose .bcsar sound archive.
+NDS: requires DUALRIP_TEST_SDAT env var pointing to a real sound_data.sdat, or to a ROM that carries one.
+3DS: requires DUALRIP_TEST_CTR env var pointing to a real 3DS ROM (.cia/.3ds) or a loose .bcsar sound archive.
+NDS streams: requires DUALRIP_TEST_STRM env var pointing to an SDAT or a ROM whose audio is streamed (STRM, IMA-ADPCM), and optionally DUALRIP_TEST_STRM_PCM8 for an archive streamed as PCM8.
+DSE: requires DUALRIP_TEST_DSE env var pointing to a ROM whose audio uses the DSE driver.
 Each half skips independently when its env var is unset.
 """
 
@@ -39,7 +40,13 @@ def sdat():
         pytest.skip('DUALRIP_TEST_SDAT not set')
     from dualrip import SdatFile
 
-    return SdatFile(SDAT)
+    if SDAT.lower().endswith('.sdat'):
+        return SdatFile(SDAT)
+    from dualrip.formats.sdat.rom import find_sdats_in_rom
+
+    found = find_sdats_in_rom(SDAT)
+    assert found, 'no SDAT inside DUALRIP_TEST_SDAT'
+    return SdatFile.from_bytes(found[0]['data'], label=os.path.basename(SDAT))
 
 @pytest.mark.parametrize('arc_id,index', sorted(GOLDEN))
 def test_golden_render(sdat, arc_id, index):
@@ -65,6 +72,68 @@ def test_render_is_deterministic(sdat):
     b = render_one(sdat, seqarc, seqarc.entries[0], 44100, r)
     assert (a.audio == b.audio).all()
 
+# (archive, entry) -> reason reported for a silent entry
+EMPTY_GOLDEN = {
+    (0, 0): 'unused slot',
+    (0, 11): 'unused slot',
+    (1, 247): 'unused slot',
+    (2, 130): 'no notes',
+    (1, 34): 'wave archive slot empty',
+    (2, 163): 'patch empty in bank',
+}
+
+@pytest.mark.parametrize('arc_id,index', sorted(EMPTY_GOLDEN))
+def test_empty_entry_reason(sdat, arc_id, index):
+    from dualrip import BankResolver, render_one
+
+    seqarc = sdat.seqarc(arc_id)
+    res = render_one(sdat, seqarc, seqarc.entries[index], 44100, BankResolver(sdat, seqarc))
+    assert res.status == 'empty'
+    assert res.reason == EMPTY_GOLDEN[(arc_id, index)]
+
+def test_live_matches_batch_sdat(sdat):
+    """The live renderer yields exactly the one-shot render, and the racer agrees on the length."""
+    import numpy as np
+    from dualrip import BankResolver, render_one
+    from dualrip.engine.sdat.render import LiveRenderer
+
+    # a short effect keeps the test fast, the equality does not depend on the sound
+    seqarc = entry = resolver = None
+    for arc_id, _name, _count in sdat.seqarc_list:
+        candidate = sdat.seqarc(arc_id)
+        cand_resolver = BankResolver(sdat, candidate)
+        for e in candidate.entries[:40]:
+            if e.offset is None:
+                continue
+            probe = render_one(sdat, candidate, e, 44100, cand_resolver)
+            if probe.status in ('ok', 'loop') and 0 < probe.duration < 3.0:
+                seqarc, entry, resolver = candidate, e, cand_resolver
+                break
+        if entry is not None:
+            break
+    if entry is None:
+        pytest.skip('no short effect in this archive')
+    bank, wave_arc = sdat.bank(resolver.resolve(entry))
+
+    def renderer():
+        return LiveRenderer(seqarc.blob, entry.offset, bank, wave_arc, entry.volume, 44100,
+                            player_prio=entry.cpr or 0, loop_passes=2)
+
+    r = renderer()
+    parts = []
+    while not r.finished:
+        out = r.step(produce=True)
+        if out is not None:
+            parts.append(out)
+    live = np.concatenate(parts) if parts else np.zeros((0, 2), dtype=np.int16)
+    batch = render_one(sdat, seqarc, entry, 44100, resolver).audio
+    batch = batch if batch is not None else np.zeros((0, 2), dtype=np.int16)
+    assert live.shape == batch.shape
+    assert np.array_equal(live, batch)
+
+    racer = renderer()
+    racer.fast_forward_to(10 ** 9)
+    assert racer.emitted == len(batch)
 
 # ---------------------------------------------------------------------------
 # 3DS (CSAR: CSEQ + CWSD + BCSTM)
@@ -118,3 +187,252 @@ def test_render_is_deterministic_ctr(archive):
     a, *_ = render_ctr_one(archive, sound, 44100)
     b, *_ = render_ctr_one(archive, sound, 44100)
     assert (a.audio == b.audio).all()
+
+# sound name -> reason reported when it renders silent
+EMPTY_GOLDEN_CTR = {
+    'SE_KT_SLIP_NONE': 'unused slot',
+    'SE_KT_HORN_KOOPA': 'notes rejected by bank',
+    'SE_EN_KILLER_CANNON_MOVE': 'entry volume zero',
+}
+
+@pytest.mark.parametrize('name', sorted(EMPTY_GOLDEN_CTR))
+def test_empty_reason_ctr(archive, name):
+    from dualrip.export import render_ctr_one
+
+    sound = next((s for s in archive.sounds if s.name == name), None)
+    if sound is None:
+        pytest.skip(f'{name} not in this archive')
+    res, _chans, _rate, _loop = render_ctr_one(archive, sound, 16000, keep_audio=False)
+    assert res.status == 'empty'
+    assert res.reason == EMPTY_GOLDEN_CTR[name]
+
+def test_live_matches_batch_ctr(archive):
+    """The live renderer matches the one-shot render, and resumes mid-stream exactly."""
+    import numpy as np
+    from dualrip.engine.ctr import LiveRenderer
+
+    seqs = [s for s in archive.sounds if archive.kind_label(s) == 'seq']
+    if not seqs:
+        pytest.skip('no sequence in this archive')
+    # effect sequences are short, which keeps the test fast
+    sound = next((s for s in seqs if s.name.startswith('SE_')), seqs[0])
+    rate = 8000 # low rate keeps the test short, the equality does not depend on it
+    blob = archive.sequence_blob(sound)
+    lookup = archive.sequence_lookup(sound)
+    prio, vol = sound.channel_prio or 64, sound.volume
+
+    def renderer():
+        return LiveRenderer(blob, sound.start_offset, lookup, rate, prio, base_vol=vol)
+
+    def run(target=None):
+        r = renderer()
+        if target is not None:
+            r.fast_forward_to(target)
+        start = r.emitted
+        parts = []
+        while not r.finished:
+            out = r.step(produce=True)
+            if out is not None:
+                parts.append(out)
+        audio = np.concatenate(parts) if parts else np.zeros((0, 2), dtype=np.int16)
+        return audio, r.loop_marks, start
+
+    _rate, chans, loop = archive.render(sound, rate)
+    batch = np.column_stack((np.asarray(chans[0], dtype=np.int16),
+                             np.asarray(chans[1], dtype=np.int16)))
+    live, marks, _start = run()
+    assert live.shape == batch.shape
+    assert np.array_equal(live, batch)
+    assert marks == loop
+
+    racer = renderer()
+    racer.fast_forward_to(10 ** 9)
+    assert racer.emitted == len(batch)
+    assert racer.loop_marks == loop
+
+    if len(batch) > 4000:
+        mid = len(batch) // 2
+        after, _marks, start = run(target=mid)
+        assert start >= mid
+        assert np.array_equal(after, batch[start:])
+
+# ---------------------------------------------------------------------------
+# NDS streams (SDAT: STRM)
+# ---------------------------------------------------------------------------
+
+STRM_FILE = os.environ.get('DUALRIP_TEST_STRM')
+STRM_PCM8_FILE = os.environ.get('DUALRIP_TEST_STRM_PCM8')
+
+# stream index -> sha256 of the int16 stereo PCM the preview plays
+GOLDEN_STRM = {
+    # covers: long stereo IMA-ADPCM stream, looped stream, short looped stream
+    0: '780ade597f3a1341e0107267071859d2a8a0803a27f601457a5f4df1a9983c7d',
+    1: 'f74e3bacd469360b10b7cdae85b6fbb52185f2ff495088aa4d84ac31afc2af94',
+    2: 'bc92385c0c6bde543d9b8a8934fbf0481eec43fa16eaeb42b95966e9ae9d66c4',
+}
+
+# stream index -> sha256, for an archive whose streams are PCM8
+GOLDEN_STRM_PCM8 = {
+    0: '2c89d187453647096ec80216a336db3c8aecc1eb46be1cc3fd96edc91290832c',
+    9: '2570cd7cd06f3dc7233232a35237c25ff221286625a5795088c7778a20ca2781',
+}
+
+
+def _strm_archive(path):
+    """SdatFile of a .sdat file, or of the first SDAT carrying streams"""
+    from dualrip import SdatFile
+
+    if path.lower().endswith('.sdat'):
+        return SdatFile(path)
+    from dualrip.formats.sdat.rom import find_sdats_in_rom
+
+    for found in find_sdats_in_rom(path):
+        sdat = SdatFile.from_bytes(found['data'], label=os.path.basename(path))
+        if sdat.stream_list:
+            return sdat
+    return None
+
+@pytest.fixture(scope='module')
+def strm_sdat():
+    if not STRM_FILE or not os.path.exists(STRM_FILE):
+        pytest.skip('DUALRIP_TEST_STRM not set')
+    sdat = _strm_archive(STRM_FILE)
+    assert sdat is not None, 'no SDAT with streams in DUALRIP_TEST_STRM'
+    return sdat
+
+@pytest.fixture(scope='module')
+def strm_pcm8_sdat():
+    if not STRM_PCM8_FILE or not os.path.exists(STRM_PCM8_FILE):
+        pytest.skip('DUALRIP_TEST_STRM_PCM8 not set')
+    sdat = _strm_archive(STRM_PCM8_FILE)
+    assert sdat is not None, 'no SDAT with streams in DUALRIP_TEST_STRM_PCM8'
+    return sdat
+
+@pytest.mark.parametrize('index', sorted(GOLDEN_STRM))
+def test_golden_stream(strm_sdat, index):
+    from dualrip.export import render_strm_one
+
+    name = dict((i, n) for i, n, _v in strm_sdat.stream_list)[index]
+    res, _audio, _rate, _loop = render_strm_one(strm_sdat, index, name)
+    assert res.status in ('ok', 'loop'), res.error
+    digest = hashlib.sha256(res.audio.tobytes()).hexdigest()
+    expected = GOLDEN_STRM[index]
+    if expected is None:
+        # first run: print the hash to pin in GOLDEN_STRM
+        print(f'\nGOLDEN_STRM[{index}] = {digest!r}')
+    else:
+        assert digest == expected
+
+@pytest.mark.parametrize('index', sorted(GOLDEN_STRM_PCM8))
+def test_golden_stream_pcm8(strm_pcm8_sdat, index):
+    from dualrip.export import render_strm_one
+
+    name = dict((i, n) for i, n, _v in strm_pcm8_sdat.stream_list)[index]
+    res, _audio, _rate, _loop = render_strm_one(strm_pcm8_sdat, index, name)
+    assert res.status in ('ok', 'loop'), res.error
+    digest = hashlib.sha256(res.audio.tobytes()).hexdigest()
+    expected = GOLDEN_STRM_PCM8[index]
+    if expected is None:
+        # first run: print the hash to pin in GOLDEN_STRM_PCM8
+        print(f'\nGOLDEN_STRM_PCM8[{index}] = {digest!r}')
+    else:
+        assert digest == expected
+
+@pytest.mark.parametrize('fixture_name', ('strm_sdat', 'strm_pcm8_sdat'))
+def test_stream_header_matches_decode(request, fixture_name):
+    """Declared sample count, channels and block arithmetic agree with the decode."""
+    sdat = request.getfixturevalue(fixture_name)
+    for sid, name, _vol in sdat.stream_list:
+        st = sdat.stream(sid)
+        audio = st.decode()
+        assert audio.shape == (st.num_samples, st.channels), name
+        assert st.num_samples == (
+            (st.num_blocks - 1) * st.block_samples + st.last_block_samples), name
+        if st.wave_type == 2:
+            assert (st.block_size - 4) * 2 == st.block_samples, name
+        elif st.wave_type == 0:
+            assert st.block_size == st.block_samples, name
+        else:
+            assert st.block_size == st.block_samples * 2, name
+
+# ---------------------------------------------------------------------------
+# DSE (SMDL + SEDL + SADL)
+# ---------------------------------------------------------------------------
+
+DSE_FILE = os.environ.get('DUALRIP_TEST_DSE')
+
+# sound name -> reason reported when it renders silent
+EMPTY_GOLDEN_DSE = {
+    'GE_002_04': 'track expression zero',
+    'SI_100_06': 'sample missing',
+}
+
+@pytest.fixture(scope='module')
+def dse_archive():
+    if not DSE_FILE or not os.path.exists(DSE_FILE):
+        pytest.skip('DUALRIP_TEST_DSE not set')
+    from dualrip.formats.dse import open_dse_rom
+
+    return open_dse_rom(DSE_FILE)
+
+@pytest.mark.parametrize('name', sorted(EMPTY_GOLDEN_DSE))
+def test_empty_reason_dse(dse_archive, name):
+    """A silent DSE sound names its cause: a skipped note or a muted track."""
+    from dualrip.export import render_dse_one
+
+    entry = next((s for s in dse_archive.sounds if s.name == name), None)
+    if entry is None:
+        pytest.skip(f'{name} not in this archive')
+    res, _audio, _rate, _loop = render_dse_one(dse_archive, entry, 32728, keep_audio=False)
+    assert res.status == 'empty'
+    assert res.reason == EMPTY_GOLDEN_DSE[name]
+
+def test_live_matches_batch_dse(dse_archive):
+    """The DSE live renderer matches the one-shot render, and resumes mid-stream exactly."""
+    import numpy as np
+    from dualrip.engine.dse.synth import LiveRenderer
+    from dualrip.export import render_dse_one
+
+    rate = 32728
+    # effects are short, which keeps the test fast; the equality does not depend on the sound
+    entry = None
+    for cand in [s for s in dse_archive.sounds if s.kind == 'sfx' and s.events][:6]:
+        probe, _a, _r, _l = render_dse_one(dse_archive, cand, rate, keep_audio=False)
+        if probe.status == 'ok' and 0 < probe.duration < 6.0:
+            entry = cand
+            break
+    if entry is None:
+        pytest.skip('no short DSE effect in this archive')
+
+    def renderer():
+        return LiveRenderer(entry.events, entry.tpqn, entry.ntrk, entry.preset, entry.bank,
+                            rate, drain_held=entry.kind == 'sfx')
+
+    def run(target=None):
+        r = renderer()
+        if target is not None:
+            r.fast_forward_to(target)
+        start = r.emitted
+        parts = []
+        while not r.finished:
+            out = r.step(produce=True)
+            if out is not None:
+                parts.append(out)
+        audio = np.concatenate(parts) if parts else np.zeros((0, 2), dtype=np.int16)
+        return audio, start
+
+    _res, batch, _rate, _loop = render_dse_one(dse_archive, entry, rate)
+    batch = batch if batch is not None else np.zeros((0, 2), dtype=np.int16)
+    live, _start = run()
+    assert live.shape == batch.shape
+    assert np.array_equal(live, batch)
+
+    racer = renderer()
+    racer.fast_forward_to(10 ** 9)
+    assert racer.emitted == len(batch)
+
+    if len(batch) > 4000:
+        mid = len(batch) // 2
+        after, start = run(target=mid)
+        assert start >= mid
+        assert np.array_equal(after, batch[start:])

@@ -208,10 +208,15 @@ class ExportDialog(QDialog):
         sdat = self._sdat(sk)
         return [sid for sid, _n, _b in sdat.sequence_list]
 
+    def _all_strm_ids(self, sk):
+        return [sid for sid, _n, _v in self._sdat(sk).stream_list]
+
     def _job_size(self, sk, kind, ident, sel):
         sdat = self._sdat(sk)
         if kind == 'seq':
             return len(sel) if sel is not None else len(self._all_seq_ids(sk))
+        if kind == 'strm':
+            return len(sel) if sel is not None else len(self._all_strm_ids(sk))
         if sel is not None:
             return len(sel)
         if kind == 'carc' or kind == 'dse':
@@ -241,6 +246,15 @@ class ExportDialog(QDialog):
                     self.log.appendPlainText(f'[{sdat_label}] SSEQ (music) - {len(ids)} sequences:')
                     for sid in ids:
                         self.log.appendPlainText(f'[{sid:3d}] {seq_names.get(sid, sid)}')
+            elif kind == 'strm':
+                strm_names = {sid: name for sid, name, _v in sdat.stream_list}
+                ids = sorted(sel) if sel is not None else self._all_strm_ids(sk)
+                if sel is None:
+                    self.log.appendPlainText(f'[{sdat_label}] STRM (streams) - all {len(ids)} sounds')
+                else:
+                    self.log.appendPlainText(f'[{sdat_label}] STRM (streams) - {len(ids)} sounds:')
+                    for sid in ids:
+                        self.log.appendPlainText(f'[{sid:3d}] {strm_names.get(sid, sid)}')
             else:
                 seqarc = sdat.seqarc(ident)
                 if sel is None:

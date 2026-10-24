@@ -1,10 +1,152 @@
 """3DS render entry points."""
 
+import copy
+import numpy as np
 from .cprims import (
     AMPL_K, AMPL_THRESHOLD, CS_NONE, CS_RELEASE, DRIVER_HZ,
     cdiv, cnv_attack, cnv_fall, cnv_sust,
 )
 from .sequencer import CseqPlayer
+
+def _int16_stereo(left, right):
+    """Float sample lists to an int16 stereo block, clipped like the one-shot path."""
+    out = np.empty((len(left), 2), dtype=np.int16)
+    out[:, 0] = np.clip(left, -32768, 32767)
+    out[:, 1] = np.clip(right, -32768, 32767)
+    return out
+
+class LiveRenderer:
+    """Resumable, seekable driver for one CSEQ entry."""
+
+    def __init__(self, blob, start_offset, bank_lookup, rate, channel_prio, hold_seconds=2.0, loop_passes=2, base_vol=127, effects=None):
+        self.rate = rate
+        self.hold_seconds = hold_seconds
+        self.channel_prio = channel_prio
+        self.loop_passes = loop_passes
+        self.base_vol = base_vol
+        self.effects = effects
+        self.ply = CseqPlayer(blob, bank_lookup, rate, channel_prio, loop_passes, base_vol, effects)
+        self.ply.setup(start_offset)
+        self.ply.timer()
+        self.samples_per_clock = rate / DRIVER_HZ
+        self.frac = 0.0
+        self.total = 0 # samples advanced
+        self.emitted = 0 # recorded samples
+        self.recording = False
+        self.tick0_ran = False
+        self.idle_clocks = 0
+        self.finished = False
+
+    @staticmethod
+    def _share_memo(ply):
+        """Deepcopy memo keeping the sequence bytes and the sample arrays shared."""
+        memo = {id(ply.blob): ply.blob}
+        for v in ply.voices:
+            samples = getattr(v, 'samples', None)
+            if isinstance(samples, np.ndarray):
+                memo[id(samples)] = samples
+        return memo
+
+    def snapshot(self):
+        """Restorable copy of the render state."""
+        return {
+            'ply': copy.deepcopy(self.ply, self._share_memo(self.ply)),
+            'rate': self.rate,
+            'hold_seconds': self.hold_seconds,
+            'channel_prio': self.channel_prio,
+            'loop_passes': self.loop_passes,
+            'base_vol': self.base_vol,
+            'effects': self.effects,
+            'samples_per_clock': self.samples_per_clock,
+            'frac': self.frac,
+            'total': self.total,
+            'emitted': self.emitted,
+            'recording': self.recording,
+            'tick0_ran': self.tick0_ran,
+            'idle_clocks': self.idle_clocks,
+            'finished': self.finished,
+        }
+
+    @classmethod
+    def from_snapshot(cls, snap):
+        """Renderer rebuilt from a snapshot."""
+        r = cls.__new__(cls)
+        r.rate = snap['rate']
+        r.hold_seconds = snap['hold_seconds']
+        r.channel_prio = snap['channel_prio']
+        r.loop_passes = snap['loop_passes']
+        r.base_vol = snap['base_vol']
+        r.effects = snap['effects']
+        r.ply = copy.deepcopy(snap['ply'], cls._share_memo(snap['ply']))
+        r.samples_per_clock = snap['samples_per_clock']
+        r.frac = snap['frac']
+        r.total = snap['total']
+        r.emitted = snap['emitted']
+        r.recording = snap['recording']
+        r.tick0_ran = snap['tick0_ran']
+        r.idle_clocks = snap['idle_clocks']
+        r.finished = snap['finished']
+        return r
+
+    @property
+    def loop_marks(self):
+        ply = self.ply
+        if ply.loop_detected and ply.loop_start_sample is not None:
+            return ply.loop_start_sample, ply.loop_end_sample or self.emitted
+        return None
+
+    def step(self, produce=True):
+        """Advance one driver clock; returns an int16 (n, 2) block or None."""
+        ply = self.ply
+        frozen = ply.tempo == 0 and ply.tempoCount < ply.tick_threshold()
+        seq_done = ply.all_tracks_ended() or frozen
+        if seq_done and not ply.any_voice_active():
+            self.finished = True
+            return None
+        if seq_done:
+            self.idle_clocks += 1
+            if self.idle_clocks > int(self.hold_seconds * DRIVER_HZ):
+                # endless notes only the game can stop
+                for v in ply.voices:
+                    if v.state > CS_NONE and v.state != CS_RELEASE:
+                        v.release()
+                if self.idle_clocks > int(self.hold_seconds * DRIVER_HZ) + int(5 * DRIVER_HZ):
+                    self.finished = True
+                    return None
+        else:
+            self.idle_clocks = 0
+
+        self.frac += self.samples_per_clock
+        n = int(self.frac)
+        self.frac -= n
+        ply.now_sample = self.emitted
+        out = None
+        if self.recording:
+            if produce:
+                l, r = ply.generate(n)
+                out = _int16_stereo(l, r)
+            else:
+                ply.generate(n, produce=False)
+            self.emitted += n
+        else:
+            if produce:
+                ply.generate(n)
+            else:
+                ply.generate(n, produce=False)
+            if self.tick0_ran:
+                self.recording = True
+                ply.now_sample = 0
+        self.total += n
+        if ply.ticked:
+            self.tick0_ran = True
+        ply.timer()
+        return out
+
+    def fast_forward_to(self, target_sample):
+        """Silent fast-forward until emitted >= target_sample or the render ends."""
+        while not self.finished and self.emitted < target_sample:
+            self.step(produce=False)
+        return self.emitted
 
 def render_entry(blob, start_offset, bank_lookup, rate, channel_prio, hold_seconds=2.0, loop_passes=2, base_vol=127, effects=None):
     """Render one CSEQ entry to (chans, loop, unapplied)."""

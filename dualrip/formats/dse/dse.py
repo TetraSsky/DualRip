@@ -184,13 +184,13 @@ class DseArchive:
             by[s.kind] += 1
         return by
 
-    def render(self, entry, rate):
+    def render(self, entry, rate, stats=None):
         """Render a DSE sound to stereo int16 samples at the given rate."""
         if entry.kind == 'stream':
             native_rate, stereo, loop = sadl_mod.decode(entry.data)
             return stereo, native_rate, loop
         from ...engine.dse.synth import render
-        audio = render(entry.events, entry.tpqn, entry.ntrk, entry.preset, entry.bank, rate, drain_held=(entry.kind == 'sfx'))
+        audio = render(entry.events, entry.tpqn, entry.ntrk, entry.preset, entry.bank, rate, drain_held=(entry.kind == 'sfx'), stats=stats)
         return audio, rate, None
 
 def _rom_file_names(rom):

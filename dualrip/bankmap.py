@@ -1,4 +1,4 @@
-"""Bank resolution: patch scanning and auto-mapping for null bank slots."""
+"""Bank resolution: bytecode scanning and auto-mapping for null bank slots."""
 
 from collections import Counter
 from .engine.sdat.sequencer import (
@@ -19,6 +19,8 @@ from .engine.sdat.sequencer import (
 )
 
 MAX_SCAN_STEPS = 2000 # per-branch safety bound for malformed bytecode
+
+FIN_BYTE = b'\xff' # terminates a sequence body
 
 def scan_patches(blob, off):
     """Instrument numbers a sequence entry uses."""
@@ -62,6 +64,55 @@ def scan_patches(blob, off):
                     _v, pc = readvl(blob, pc)
     # a sequence with no PATCH command plays with the default patch 0
     return out or {0}
+
+def sequence_has_notes(blob, off):
+    """True if the sequence at off contains at least one note-on"""
+    todo = [off]
+    seen = set()
+    while todo:
+        pc = todo.pop()
+        for _ in range(MAX_SCAN_STEPS):
+            if pc in seen or pc < 0 or pc >= len(blob):
+                break
+            seen.add(pc)
+            cmd = blob[pc]
+            pc += 1
+            if cmd == SSEQ_CMD_FIN:
+                break
+            elif cmd < SSEQ_NOTE_LIMIT:
+                return True
+            elif cmd == SSEQ_CMD_OPEN_TRACK:
+                todo.append(blob[pc + 1] | (blob[pc + 2] << 8) | (blob[pc + 3] << 16))
+                pc += 4
+            elif cmd in (SSEQ_CMD_GOTO, SSEQ_CMD_CALL):
+                todo.append(blob[pc] | (blob[pc + 1] << 8) | (blob[pc + 2] << 16))
+                pc += 3
+                if cmd == SSEQ_CMD_GOTO:
+                    break
+            elif cmd in (SSEQ_CMD_RANDOM, SSEQ_CMD_FROM_VAR):
+                sub = blob[pc]
+                pc += 1
+                if (SSEQ_VAR_CMD_FIRST <= sub <= SSEQ_VAR_CMD_LAST) or sub < SSEQ_NOTE_LIMIT:
+                    pc += 1
+                pc += 4 if cmd == SSEQ_CMD_RANDOM else 1
+            else:
+                nb = sseq_command_byte_count(cmd)
+                pc += nb & ~(VARIABLE_BYTE_COUNT | EXTRA_BYTE)
+                if nb & VARIABLE_BYTE_COUNT:
+                    _v, pc = readvl(blob, pc)
+    return False
+
+def empty_reason(blob, entry, refusals):
+    """No audio reason for this entry, or '' if playable."""
+    if blob[entry.offset:entry.offset + 1] == FIN_BYTE:
+        return 'unused slot'
+    if refusals:
+        return max(refusals, key=refusals.get)
+    if not sequence_has_notes(blob, entry.offset):
+        return 'no notes'
+    if entry.volume == 0:
+        return 'entry volume zero'
+    return ''
 
 def patch_playable(entries, slot_sizes, p):
     """True if patch p resolves every instrument to a valid sample."""

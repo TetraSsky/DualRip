@@ -1,5 +1,6 @@
 """DSE synthesis: a sequencer driving a per-note sampler with an ADSR envelope."""
 
+import copy
 import numpy as np
 
 # envelope duration lookups, indexed by the 0-127 parameter (in ms)
@@ -144,7 +145,276 @@ class Voice:
             self.rel_at = self.epos
             self.rel_level = float(self._held_level(np.array([self.epos]))[0])
 
-def render(events, tpqn, ntrk, preset, bank, out_rate=32728, master=0.7, drain_held=False):
+    def skip(self, n):
+        """Advance n samples without synthesizing, with the same death rules as render."""
+        if self.dead:
+            return
+        if self.loop:
+            span = self.loop_end - self.loop_beg
+            p = self.pos + self.step * n
+            self.pos = p if p < self.loop_end else self.loop_beg + (p - self.loop_beg) % span
+            self.epos += n
+        else:
+            last = len(self.pcm) - 1
+            if self.step > 0:
+                alive = int(np.ceil((last - self.pos) / self.step))
+                alive = max(0, min(n, alive))
+            else:
+                alive = n
+            self.pos += self.step * n
+            self.epos += n
+            if alive < n:
+                self.dead = True
+        if self.rel_at is not None and (self.epos - self.rel_at) >= self.release_s:
+            self.dead = True
+
+class LiveRenderer:
+    """Resumable, seekable driver for one DSE sequence."""
+
+    TAIL_SECONDS = 1.5 # release tail after the last event
+    DRAIN_CHUNK = 0.25 # drain step for held one-shot voices
+    DRAIN_CAP = 18.0 # bound on that drain
+
+    def __init__(self, events, tpqn, ntrk, preset, bank, out_rate=32728, master=0.7, drain_held=False, block=1024, stats=None):
+        self.events = events
+        self.tpqn = tpqn
+        self.ntrk = ntrk
+        self.preset = preset
+        self.bank = bank
+        self.out_rate = out_rate
+        self.master = master
+        self.drain_held = drain_held
+        self.block = block
+        self.stats = stats
+        self.prog = [0] * ntrk
+        self.vol = [127] * ntrk
+        self.expr = [127] * ntrk
+        self.pan = [64] * ntrk
+        self.bend = [0] * ntrk
+        self.bpm = 120
+        self.voices = []
+        self.active = {}
+        self.sounding = 0 # voices created with a positive amplitude
+        self.cur_tick = 0
+        self.ev_index = 0
+        self.gap_left = 0
+        self.tail_left = int(out_rate * self.TAIL_SECONDS)
+        self.drain_left = 0
+        self.drained = 0
+        self.phase = 'tail' if not events else 'gap'
+        self.emitted = 0
+        self.finished = False
+        if events:
+            self.gap_left = self._gap_samples(events[0][0] - self.cur_tick)
+
+    def _gap_samples(self, dtick):
+        """Samples spanned by a tick delta at the current tempo."""
+        if dtick <= 0:
+            return 0
+        return int(self.out_rate * dtick * 60 / (self.bpm * self.tpqn))
+
+    @staticmethod
+    def _share_memo(preset, bank):
+        """Deepcopy memo keeping the parsed preset and bank shared."""
+        return {id(preset): preset, id(bank): bank}
+
+    def snapshot(self):
+        """Restorable copy of the render state."""
+        state = (self.voices, self.active, self.prog, self.vol, self.expr, self.pan, self.bend)
+        memo = self._share_memo(self.preset, self.bank)
+        for v in self.voices:
+            memo[id(v.pcm)] = v.pcm
+        voices, active, prog, vol, expr, pan, bend = copy.deepcopy(state, memo)
+        return {
+            'events': self.events,
+            'tpqn': self.tpqn,
+            'ntrk': self.ntrk,
+            'preset': self.preset,
+            'bank': self.bank,
+            'out_rate': self.out_rate,
+            'master': self.master,
+            'drain_held': self.drain_held,
+            'block': self.block,
+            'stats': self.stats,
+            'prog': prog,
+            'vol': vol,
+            'expr': expr,
+            'pan': pan,
+            'bend': bend,
+            'bpm': self.bpm,
+            'voices': voices,
+            'sounding': self.sounding,
+            'active': active,
+            'cur_tick': self.cur_tick,
+            'ev_index': self.ev_index,
+            'gap_left': self.gap_left,
+            'tail_left': self.tail_left,
+            'drain_left': self.drain_left,
+            'drained': self.drained,
+            'phase': self.phase,
+            'emitted': self.emitted,
+            'finished': self.finished,
+        }
+
+    @classmethod
+    def from_snapshot(cls, snap):
+        """Renderer rebuilt from a snapshot."""
+        r = cls.__new__(cls)
+        for name in ('events', 'tpqn', 'ntrk', 'preset', 'bank', 'out_rate', 'master',
+            'drain_held', 'block', 'prog', 'vol', 'expr', 'pan', 'bend',
+            'bpm', 'sounding', 'cur_tick', 'ev_index', 'gap_left', 'tail_left',
+            'drain_left', 'drained', 'phase', 'emitted', 'finished'):
+            setattr(r, name, snap[name])
+        state = (snap['voices'], snap['active'], snap['prog'], snap['vol'], snap['expr'], snap['pan'], snap['bend'])
+        memo = cls._share_memo(snap['preset'], snap['bank'])
+        for v in snap['voices']:
+            memo[id(v.pcm)] = v.pcm
+        (r.voices, r.active, r.prog, r.vol, r.expr, r.pan, r.bend) = copy.deepcopy(state, memo)
+        r.stats = None
+        return r
+
+    def _pick_split(self, program, midi, vel):
+        """Preset program and split covering the note."""
+        pr = self.preset.programs.get(program)
+        if pr is None:
+            return None
+        for sp in pr.splits:
+            if sp.low_key <= midi <= sp.high_key and sp.low_vel <= vel <= sp.high_vel:
+                return pr, sp
+        return (pr, pr.splits[0]) if pr.splits else None
+
+    def _apply_event(self):
+        """Apply the next event to the sequencer state."""
+        ev = self.events[self.ev_index]
+        self.ev_index += 1
+        kind = ev[1]
+        if kind == 'tempo':
+            self.bpm = ev[2] or self.bpm
+        elif kind == 'prog':
+            self.prog[ev[2]] = ev[3]
+        elif kind == 'vol':
+            self.vol[ev[2]] = ev[3]
+        elif kind == 'expr':
+            self.expr[ev[2]] = ev[3]
+        elif kind == 'pan':
+            self.pan[ev[2]] = ev[3]
+        elif kind == 'bend':
+            self.bend[ev[2]] = ev[3]
+        elif kind == 'on':
+            _t, _k, tid, midi, vel = ev
+            picked = self._pick_split(self.prog[tid], midi, vel)
+            if picked is None:
+                _count(self.stats, 'program not in preset')
+                return
+            pr, sp = picked
+            sample = self.bank.samples.get(sp.sample_id)
+            if sample is None or sample.raw is None:
+                _count(self.stats, 'sample missing')
+                return
+            semitones = midi - sp.root_key # coarse + fine tuning
+            amp = (vel / 127.0) * (sp.volume / 127.0 if sp.volume >= 0 else 1.0)
+            amp *= (pr.volume / 127.0) * (self.vol[tid] / 127.0) * (self.expr[tid] / 127.0)
+            if amp <= 0.0:
+                _count(self.stats, _mute_reason(vel, sp, pr, self.vol[tid], self.expr[tid]))
+            v = Voice(sample, sp, semitones, amp, self.pan[tid], self.out_rate)
+            v.tid = tid
+            if amp > 0.0:
+                self.sounding += 1
+            key = (tid, midi)
+            if key in self.active:
+                self.active[key].release()
+            self.active[key] = v
+            self.voices.append(v)
+        elif kind == 'off':
+            _t, _k, tid, midi = ev
+            v = self.active.pop((tid, midi), None)
+            if v is not None:
+                v.release()
+
+    def _render(self, n, produce):
+        """Render or skip n samples over every live voice."""
+        if produce:
+            buf = np.zeros((n, 2), dtype=np.float32)
+            for v in self.voices:
+                v.render(n, buf)
+            buf *= self.master
+            np.clip(buf, -32768, 32767, out=buf)
+            out = buf.astype(np.int16)
+        else:
+            for v in self.voices:
+                v.skip(n)
+            out = None
+        self.emitted += n
+        return out
+
+    def step(self, produce=True):
+        """Advance to the next block; returns an int16 (n, 2) block or None."""
+        while True:
+            if self.phase == 'done':
+                self.finished = True
+                return None
+            if self.phase == 'gap':
+                n = min(self.gap_left, self.block)
+                self.gap_left -= n
+                if self.gap_left <= 0:
+                    self.cur_tick = self.events[self.ev_index][0]
+                    self.voices = [v for v in self.voices if not v.dead]
+                    self.phase = 'event'
+                return self._render(n, produce)
+            if self.phase == 'event':
+                self._apply_event()
+                if self.ev_index < len(self.events):
+                    self.gap_left = self._gap_samples(self.events[self.ev_index][0] - self.cur_tick)
+                    self.phase = 'gap' if self.gap_left > 0 else 'event'
+                else:
+                    self.tail_left = int(self.out_rate * self.TAIL_SECONDS)
+                    self.phase = 'tail'
+                continue
+            if self.phase == 'tail':
+                n = min(self.tail_left, self.block)
+                self.tail_left -= n
+                if self.tail_left <= 0:
+                    self.drain_left = 0
+                    self.phase = 'drain' if self.drain_held else 'done'
+                return self._render(n, produce)
+            if self.phase == 'drain':
+                if self.drain_left <= 0:
+                    self.voices = [v for v in self.voices if not v.dead]
+                    if not self.voices or self.drained >= int(self.out_rate * self.DRAIN_CAP):
+                        self.phase = 'done'
+                        continue
+                    self.drain_left = int(self.out_rate * self.DRAIN_CHUNK)
+                n = min(self.drain_left, self.block)
+                self.drain_left -= n
+                self.drained += n
+                return self._render(n, produce)
+
+    def fast_forward_to(self, target_sample):
+        """Silent fast-forward until emitted >= target_sample or the render ends."""
+        while not self.finished and self.emitted < target_sample:
+            self.step(produce=False)
+        return self.emitted
+
+def _count(stats, reason):
+    """Count one skipped note by reason, when a sink is given."""
+    if stats is not None:
+        stats[reason] = stats.get(reason, 0) + 1
+
+def _mute_reason(vel, split, program, track_vol, track_expr):
+    """Name the amplitude factor that silences a note."""
+    if vel == 0:
+        return 'zero velocity'
+    if split.volume == 0:
+        return 'split volume zero'
+    if program.volume == 0:
+        return 'preset volume zero'
+    if track_vol == 0:
+        return 'track volume zero'
+    if track_expr == 0:
+        return 'track expression zero'
+    return 'silent amplitude'
+
+def render(events, tpqn, ntrk, preset, bank, out_rate=32728, master=0.7, drain_held=False, stats=None):
     """Render a sequence of events to a stereo audio buffer."""
     prog = [0] * ntrk
     vol = [127] * ntrk
@@ -197,14 +467,18 @@ def render(events, tpqn, ntrk, preset, bank, out_rate=32728, master=0.7, drain_h
             _t, _k, tid, midi, vel = ev
             picked = pick_split(prog[tid], midi, vel)
             if picked is None:
+                _count(stats, 'program not in preset')
                 continue
             pr, sp = picked
             sample = bank.samples.get(sp.sample_id)
             if sample is None or sample.raw is None:
+                _count(stats, 'sample missing')
                 continue
             semitones = midi - sp.root_key # carries coarse+fine tuning
             amp = (vel / 127.0) * (sp.volume / 127.0 if sp.volume >= 0 else 1.0)
             amp *= (pr.volume / 127.0) * (vol[tid] / 127.0) * (expr[tid] / 127.0)
+            if amp <= 0.0:
+                _count(stats, _mute_reason(vel, sp, pr, vol[tid], expr[tid]))
             v = Voice(sample, sp, semitones, amp, pan[tid], out_rate)
             v.tid = tid
             key = (tid, midi)

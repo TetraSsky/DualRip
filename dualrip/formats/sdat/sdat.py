@@ -8,6 +8,7 @@ from .common import (
     NO_WAVE_ARCHIVE,
 )
 from .sbnk import parse_sbnk
+from .strm import Strm
 from .swar import parse_swar
 
 def _swar_wave_count(war):
@@ -51,6 +52,7 @@ class SdatFile:
         self._sdat = ndspy.soundArchive.SDAT.fromFile(path)
         self._seqarc_cache = {}
         self._seq_cache = {}
+        self._strm_cache = {}
         self._bank_cache = {}
         self._meta_cache = {}
         self._swar_cache = {}
@@ -63,6 +65,7 @@ class SdatFile:
         inst._sdat = ndspy.soundArchive.SDAT(data)
         inst._seqarc_cache = {}
         inst._seq_cache = {}
+        inst._strm_cache = {}
         inst._bank_cache = {}
         inst._meta_cache = {}
         inst._swar_cache = {}
@@ -124,6 +127,24 @@ class SdatFile:
             entry = SeqArcEntry(seq_id, sname, seq.bankID, seq.volume, seq.channelPressure, 0)
             self._seq_cache[seq_id] = SeqArc(('SSEQ', seq_id), sname, blob, [entry])
         return self._seq_cache[seq_id]
+
+    @property
+    def stream_list(self):
+        """[(stream_id, name, volume)] for every non-null STRM (streamed audio)."""
+        out = []
+        for i, (name, st) in enumerate(self._sdat.streams):
+            if st is not None:
+                out.append((i, name or f'STRM_{i}', st.volume))
+        return out
+
+    def stream(self, stream_id):
+        """Parsed STRM for one streamed sound."""
+        if stream_id not in self._strm_cache:
+            name, st = self._sdat.streams[stream_id]
+            if st is None:
+                raise ValueError(f'stream {stream_id} is null')
+            self._strm_cache[stream_id] = Strm(bytes(st.save()[0]))
+        return self._strm_cache[stream_id]
 
     @property
     def bank_list(self):

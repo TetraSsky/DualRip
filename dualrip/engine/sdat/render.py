@@ -19,11 +19,13 @@ STREAM_CHUNK_SAMPLES = 8820
 class LiveRenderer:
     """Resumable, seekable driver for one sequence entry."""
 
-    def __init__(self, blob, start_offset, bank, waveArc, entry_volume, rate, hold_seconds=2.0, player_prio=0, loop_passes=1):
+    def __init__(self, blob, start_offset, bank, waveArc, entry_volume, rate, hold_seconds=2.0, player_prio=0, loop_passes=1, refusals=None):
         self.rate = rate
         self.hold_seconds = hold_seconds
         self.sps = 1.0 / rate
         self.ply = Player(blob, bank, waveArc, rate, cnv_scale(entry_volume), player_prio, loop_passes)
+        if refusals is not None:
+            self.ply.refusals = refusals
         self.ply.setup(start_offset)
         self.ply.timer()
         self.seconds_into = 0.0
@@ -175,9 +177,10 @@ def render_entry_stream(
     player_prio=0,
     chunk_samples=STREAM_CHUNK_SAMPLES,
     loop_passes=1,
+    refusals=None,
 ):
     """Yield ('data', int16 stereo) chunks, then ('end', looped, loop_marks)."""
-    r = LiveRenderer(blob, start_offset, bank, waveArc, entry_volume, rate, hold_seconds, player_prio, loop_passes)
+    r = LiveRenderer(blob, start_offset, bank, waveArc, entry_volume, rate, hold_seconds, player_prio, loop_passes, refusals)
     pend = []
     pend_n = 0
     while not r.finished:
@@ -226,12 +229,12 @@ def estimate_end_sample(blob, start_offset, rate, player_prio=0, should_abort=No
         if should_abort is not None and clocks % abort_every == 0 and should_abort():
             return None
 
-def render_entry(blob, start_offset, bank, waveArc, entry_volume, rate, hold_seconds=2.0, player_prio=0, loop_passes=1):
+def render_entry(blob, start_offset, bank, waveArc, entry_volume, rate, hold_seconds=2.0, player_prio=0, loop_passes=1, refusals=None):
     """Render one sequence entry to a single int16 stereo buffer."""
     chunks = []
     looped = False
     marks = None
-    for item in render_entry_stream(blob, start_offset, bank, waveArc, entry_volume, rate, hold_seconds, player_prio, loop_passes=loop_passes):
+    for item in render_entry_stream(blob, start_offset, bank, waveArc, entry_volume, rate, hold_seconds, player_prio, loop_passes=loop_passes, refusals=refusals):
         if item[0] == 'data':
             chunks.append(item[1])
         else:

@@ -243,7 +243,7 @@ class Track:
         ply = self.ply
         bank = ply.bank
         if self.patch >= len(bank):
-            return -1
+            return ply.refuse('patch out of table')
         entry = bank[self.patch]
         noteDef = None
         fRecord = entry.record
@@ -252,7 +252,7 @@ class Track:
                 entry.instruments
                 and entry.instruments[0].lowNote <= key <= entry.instruments[-1].highNote
             ):
-                return -1
+                return ply.refuse('key out of range')
             noteDef = entry.instruments[key - entry.instruments[0].lowNote]
             fRecord = noteDef.record
         elif fRecord == 17:
@@ -262,14 +262,14 @@ class Track:
                     noteDef = inst
                     break
             if noteDef is None:
-                return -1
+                return ply.refuse('key out of range')
             fRecord = noteDef.record
 
         chn = None
         nCh = -1
         bIsPCM = True
         if not fRecord:
-            return -1
+            return ply.refuse('patch empty in bank')
         elif fRecord == 1:
             if noteDef is None:
                 noteDef = entry.instruments[0]
@@ -280,13 +280,13 @@ class Track:
             if fRecord == 3:
                 nCh = ply.channel_alloc(2, self.prio)
                 if nCh < 0:
-                    return -1
+                    return ply.refuse('no free channel')
                 chn = ply.channels[nCh]
                 chn.tempCR = SOUND_FORMAT_PSG | SCHANNEL_ENABLE
             else:
                 nCh = ply.channel_alloc(1, self.prio)
                 if nCh < 0:
-                    return -1
+                    return ply.refuse('no free channel')
                 chn = ply.channels[nCh]
                 chn.tempCR = SOUND_FORMAT_PSG | SCHANNEL_ENABLE | ((noteDef.swav & 0x7) << 24)
             chn.tempTIMER = 0x1000000 // (262 * 8) # base timer for key 60
@@ -295,16 +295,18 @@ class Track:
             chn.reg.psgLast = 0
             chn.reg.psgLastCount = 0
         else:
-            return -1
+            return ply.refuse('unsupported record')
 
         if bIsPCM:
             swar = ply.waveArc[noteDef.swar] if noteDef.swar < len(ply.waveArc) else None
-            if swar is None or noteDef.swav >= len(swar):
-                return -1
+            if swar is None:
+                return ply.refuse('wave archive slot empty')
+            if noteDef.swav >= len(swar):
+                return ply.refuse('wave index out of range')
             swav = swar[noteDef.swav]
             nCh = ply.channel_alloc(0, self.prio)
             if nCh < 0:
-                return -1
+                return ply.refuse('no free channel')
             chn = ply.channels[nCh]
             chn.tempCR = (
                 ((swav.waveType & 3) << 29)
@@ -653,6 +655,12 @@ class Player:
         self.tracks = [Track() for _ in range(32)]
         self.trackIds = []
         self.channels = [Channel(i, self) for i in range(16)]
+        self.refusals = {} # refused note-ons counted by reason
+
+    def refuse(self, reason):
+        """Count one refused note-on and return the failure code."""
+        self.refusals[reason] = self.refusals.get(reason, 0) + 1
+        return -1
 
     def setup(self, start_offset):
         t = self.track_alloc()
