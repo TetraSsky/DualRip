@@ -27,6 +27,13 @@ RATE_MIN, RATE_MAX = 8000, 192000
 EXPORT_DIALOG_SIZE = (680, 460)
 LOG_MAX_LINES = 20000 # prevent unbounded log growth on huge batches
 
+STREAM_MODES = (
+    ('multiple', 'One file per layer (c0-1, c2-3, ...)'),
+    ('single', 'One multichannel file'),
+    ('both', 'Both'),
+)
+STREAM_MODE_DEFAULT = 'multiple'
+
 def load_settings():
     s = QSettings('DualRip', 'DualRip')
     try:
@@ -38,6 +45,7 @@ def load_settings():
         'rate': rate,
         'bank_map': s.value('bank_map', '') or '',
         'boot9': s.value('boot9', '') or '',
+        'stream_mode': s.value('stream_mode', STREAM_MODE_DEFAULT) or STREAM_MODE_DEFAULT,
     }
 
 def save_settings(values):
@@ -162,10 +170,12 @@ class ExportDialog(QDialog):
         self._worker = None
 
         settings = load_settings()
+        self._mode = settings['stream_mode']
 
         lay = QVBoxLayout(self)
 
-        total = sum(self._job_size(sk, kind, ident, sel) for sk, kind, ident, sel in jobs)
+        total = sum(self._job_size(sk, kind, ident, sel, layers, self._mode)
+                    for sk, kind, ident, sel, layers in jobs)
         self.lbl_summary = QLabel(f'{total} items from {len(jobs)} group(s), {rate} Hz')
         lay.addWidget(self.lbl_summary)
 
@@ -178,6 +188,17 @@ class ExportDialog(QDialog):
         row.addWidget(self.ed_out, 1)
         row.addWidget(btn_browse)
         lay.addLayout(row)
+
+        mode_row = QHBoxLayout()
+        self.cb_mode = QComboBox()
+        for value, label in STREAM_MODES:
+            self.cb_mode.addItem(label, value)
+        idx = max(self.cb_mode.findData(self._mode), 0)
+        self.cb_mode.setCurrentIndex(idx)
+        self.cb_mode.currentIndexChanged.connect(self._mode_changed)
+        mode_row.addWidget(QLabel('Multi-channel streams'))
+        mode_row.addWidget(self.cb_mode, 1)
+        lay.addLayout(mode_row)
 
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
@@ -211,21 +232,43 @@ class ExportDialog(QDialog):
     def _all_strm_ids(self, sk):
         return [sid for sid, _n, _v in self._sdat(sk).stream_list]
 
-    def _job_size(self, sk, kind, ident, sel):
+    def _job_size(self, sk, kind, ident, sel, layers=None, mode=None):
         sdat = self._sdat(sk)
+        mode = mode or STREAM_MODE_DEFAULT
         if kind == 'seq':
             return len(sel) if sel is not None else len(self._all_seq_ids(sk))
         if kind == 'strm':
             return len(sel) if sel is not None else len(self._all_strm_ids(sk))
+        if kind == 'carc':
+            members = sdat.folders[ident]
+            if sel is not None:
+                members = [s for s in members if s.index in sel]
+            total = 0
+            for s in members:
+                if sdat.kind_label(s) != 'strm':
+                    total += 1
+                    continue
+                only = (layers or {}).get(s.index)
+                n = len(only) if only else sdat.stream_layers(s)
+                if n <= 1:
+                    total += 1
+                elif mode == 'multiple':
+                    total += n
+                elif mode == 'single':
+                    total += 1
+                else:
+                    total += n + 1
+            return total
         if sel is not None:
             return len(sel)
-        if kind == 'carc' or kind == 'dse':
+        if kind == 'dse':
             return len(sdat.folders[ident])
         return len(sdat.seqarc(ident).entries)
 
     def _plan(self):
         self.log.appendPlainText('Export :')
-        for sk, kind, ident, sel in self._jobs:
+        self.log.appendPlainText(f'Multi-channel streams: {self._mode_label()}')
+        for sk, kind, ident, sel, layers in self._jobs:
             sdat = self._sdat(sk)
             sdat_label = self._sdats[sk][0]
             if kind == 'carc' or kind == 'dse':
@@ -236,7 +279,12 @@ class ExportDialog(QDialog):
                     self.log.appendPlainText(f'[{sdat_label}] {ident} - {len(sel)} sounds:')
                     for s in members:
                         if s.index in sel:
-                            self.log.appendPlainText(f'[{s.index:4d}] {s.name}')
+                            only = (layers or {}).get(s.index)
+                            if only:
+                                pairs = ', '.join(f'c{2 * k}-{2 * k + 1}' for k in sorted(only))
+                                self.log.appendPlainText(f'[{s.index:4d}] {s.name} ({pairs})')
+                            else:
+                                self.log.appendPlainText(f'[{s.index:4d}] {s.name}')
             elif kind == 'seq':
                 seq_names = {sid: name for sid, name, _b in sdat.sequence_list}
                 ids = sorted(sel) if sel is not None else self._all_seq_ids(sk)
@@ -270,6 +318,21 @@ class ExportDialog(QDialog):
         if d:
             self.ed_out.setText(d)
 
+    def _mode_label(self):
+        for value, label in STREAM_MODES:
+            if value == self._mode:
+                return label
+        return self._mode
+
+    def _mode_changed(self, *_):
+        """Recompute the item count and the plan for chosen stream output."""
+        self._mode = self.cb_mode.currentData() or STREAM_MODE_DEFAULT
+        save_settings({'stream_mode': self._mode})
+        total = sum(self._job_size(sk, kind, ident, sel, layers, self._mode) for sk, kind, ident, sel, layers in self._jobs)
+        self.lbl_summary.setText(f'{total} items from {len(self._jobs)} group(s), {self._rate} Hz')
+        self.log.clear()
+        self._plan()
+
     def _start(self):
         out = self.ed_out.text().strip()
         if not out:
@@ -278,9 +341,10 @@ class ExportDialog(QDialog):
         os.makedirs(out, exist_ok=True)
         self.btn_export.setEnabled(False)
         self.ed_out.setEnabled(False)
+        self.cb_mode.setEnabled(False)
         self.progress.setVisible(True)
         self.log.appendPlainText(f'Exporting to {out}')
-        self._worker = BatchWorker(self._sdats, self._jobs, out, self._rate, self._override)
+        self._worker = BatchWorker(self._sdats, self._jobs, out, self._rate, self._override, self.cb_mode.currentData() or STREAM_MODE_DEFAULT)
         self._worker.batch_progress.connect(self._on_progress)
         self._worker.archive_done.connect(self._on_archive_done)
         self._worker.batch_done.connect(self._on_done)
