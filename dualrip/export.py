@@ -358,7 +358,7 @@ def rip_ctr_folder(
         res, chans, native_rate, loop = render_ctr_one(
             archive, sound, rate, keep_audio=False)
         files = 0
-        if res.status != 'error':
+        if res.status in ('ok', 'loop'):
             wanted = (layers or {}).get(sound.index)
             total_layers = archive.stream_layers(sound) if KIND_LABEL[sound.kind] == 'strm' else 1
             if total_layers > 1:
@@ -383,7 +383,7 @@ def rip_ctr_folder(
                         fn = f'{sanitize(sound.name)}_c{2 * k}-{2 * k + 1}.wav'
                         cstm.write_wav(os.path.join(out_dir, fn), pair, pair_rate, pair_loop)
                         peak = max((abs(x) for ch in (pair or []) for x in ch), default=0)
-                        row = manifest_row(sound.index, _res, KIND_LABEL[sound.kind], _ctr_bank_cell(sound),sound.volume, peak)
+                        row = manifest_row(sound.index, _res, KIND_LABEL[sound.kind], _ctr_bank_cell(sound), sound.volume, peak)
                         row[1] = f'{sound.name} (ch {2 * k}-{2 * k + 1})'
                         manifest.append(row)
                         counts[_res.status] += 1
@@ -402,6 +402,9 @@ def rip_ctr_folder(
                 files = 1
                 written += 1
         if not files:
+            manifest.append(manifest_row(
+                sound.index, res, KIND_LABEL[sound.kind], _ctr_bank_cell(sound),
+                sound.volume, _peak(res)))
             counts[res.status] += 1
             if progress is not None:
                 progress(written, total_files, res)
@@ -462,7 +465,7 @@ def rip_streams(sdat, stream_ids, out_root, progress=None, should_cancel=None):
         name = names.get(sid, f'STRM_{sid}')
         res, audio, native_rate, loop = render_strm_one(sdat, sid, name)
         counts[res.status] += 1
-        if res.status != 'error':
+        if res.status in ('ok', 'loop'):
             fn = f'{sid:03d}_{sanitize(name)}.wav'
             write_wav_channels(os.path.join(out_dir, fn), audio, native_rate, loop)
         manifest.append(manifest_row(sid, res, 'strm', '', volumes.get(sid), _peak(res)))
@@ -526,7 +529,7 @@ def rip_dse_folder(archive, folder, out_root, rate=32728, only=None, progress=No
     for done, entry in enumerate(todo, 1):
         res, audio, out_rate, loop = render_dse_one(archive, entry, rate, keep_audio=False)
         counts[res.status] += 1
-        if res.status != 'error':
+        if res.status in ('ok', 'loop'):
             name = sanitize(entry.name)
             if name in seen:
                 name = '%s_%d' % (name, entry.index)

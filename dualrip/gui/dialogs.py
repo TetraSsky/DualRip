@@ -45,6 +45,7 @@ def load_settings():
         'rate': rate,
         'bank_map': s.value('bank_map', '') or '',
         'boot9': s.value('boot9', '') or '',
+        'group': s.value('group', '') or '',
         'stream_mode': s.value('stream_mode', STREAM_MODE_DEFAULT) or STREAM_MODE_DEFAULT,
     }
 
@@ -92,8 +93,12 @@ class SettingsDialog(QDialog):
         form.addRow('Sample rate (Hz)', self.cb_rate)
 
         self.ed_map = QLineEdit(cur['bank_map'])
-        self.ed_map.setPlaceholderText('e.g. 4=32+33+43,30=6  (empty = automatic)')
+        self.ed_map.setPlaceholderText('e.g. 4=32+33+43,30=6 (empty = automatic)')
         form.addRow('Bank map override', self.ed_map)
+
+        self.ed_group = QLineEdit(cur.get('group', ''))
+        self.ed_group.setPlaceholderText('e.g. GROUP_NAME (empty = report ambiguity)')
+        form.addRow('3DS group variant', self.ed_group)
 
         row9 = QHBoxLayout()
         self.ed_boot9 = QLineEdit(cur['boot9'])
@@ -152,6 +157,7 @@ class SettingsDialog(QDialog):
                 'rate': rate,
                 'bank_map': self.ed_map.text().strip(),
                 'boot9': boot9,
+                'group': self.ed_group.text().strip(),
             }
         )
         self.accept()

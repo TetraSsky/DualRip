@@ -500,7 +500,10 @@ class MainWindow(QMainWindow):
                 if not chosen:
                     raise ValueError('No CSAR selected.')
         self._clear_all()
+        group = load_settings()['group']
         for i, arch in enumerate(chosen):
+            if group:
+                arch.set_prefer_group(group)
             self._sdats[str(i)] = (arch.label, arch)
         self._sdat_path = path
         self._generation += 1
@@ -510,6 +513,9 @@ class MainWindow(QMainWindow):
     def _open_bcsar_file(self, path):
         """Open a loose .bcsar."""
         arch = open_bcsar(path)
+        group = load_settings()['group']
+        if group:
+            arch.set_prefer_group(group)
         self._clear_all()
         self._sdats['0'] = (arch.label, arch)
         self._sdat_path = path
@@ -1842,11 +1848,16 @@ class MainWindow(QMainWindow):
             if (
                 old['rate'] != self.settings['rate']
                 or old['bank_map'] != self.settings['bank_map']
+                or old.get('group', '') != self.settings.get('group', '')
             ):
                 self._cancel_preview()
                 self._cache.clear()
                 self._resolvers.clear()
                 self.player.clear()
+                # a group change re-targets the variant resolution of every CSAR
+                for _label, sdat in self._sdats.values():
+                    if isinstance(sdat, CtrArchive):
+                        sdat.set_prefer_group(self.settings.get('group', ''))
             self.statusBar().showMessage('Settings saved.')
 
     def show_about(self):

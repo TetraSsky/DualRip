@@ -13,7 +13,6 @@ PLAYING = 'playing'
 PAUSED = 'paused'
 
 BLOCKSIZE = 1024
-STREAM_INITIAL_SECONDS = 8
 RING_SECONDS = 2.0
 
 class _Player:
@@ -30,9 +29,6 @@ class _Player:
         self._filled = 0 # valid frames in _data (== capacity when whole)
         self._cap = 0 # allocated frames in _data
         self._final = True # False while a stream is still being fed
-        self._armed = False # want to auto-start once primed
-        self._prime = 0 # frames to buffer before auto-starting
-        self._est_total = 0 # estimated total frames while streaming
         self._epoch = 0 # bumped on every (re)load, stale-writer guard
         self._state = STOPPED
         self._loop = False
@@ -149,7 +145,7 @@ class _Player:
             outdata[:] = (outdata * self._volume).astype(np.int16)
         self._cond.notify()
 
-    def live_begin(self, rate, est_total=0, loop_marks=None):
+    def live_begin(self, rate, loop_marks=None):
         """Arm live (ring) playback, returns an epoch token or None."""
         if _sd is None:
             return None
@@ -172,7 +168,6 @@ class _Player:
             self._rd = 0
             self._cur_content = 0
             self._content_total = 0
-            self._est_total = int(est_total)
             self._final = False
             self._ended = False
             self._armed_live = True
@@ -282,8 +277,6 @@ class _Player:
                 if loop_marks:
                     self._loop_start = int(loop_marks[0])
                     self._loop_end = int(loop_marks[1])
-            elif not self._content_total:
-                self._est_total = int(frames)
 
     def loop_enabled(self):
         with self._lock:
@@ -359,90 +352,12 @@ class _Player:
             self._filled = n
             self._cap = n
             self._final = True
-            self._armed = False
-            self._est_total = 0
             self._epoch += 1
             self._loop_start = ls
             self._loop_end = le
             self._pos = 0
             self._underruns = 0
         return True
-
-    def stream_begin(self, rate, prime_frames):
-        """Arm a growing buffer, returns an epoch token or None."""
-        if _sd is None:
-            return None
-        if not self._ensure_stream(rate):
-            return None
-        cap = max(int(rate) * STREAM_INITIAL_SECONDS, int(prime_frames) + 1)
-        buf = np.zeros((cap, 2), dtype=np.int16)
-        with self._lock:
-            self._live = False # SFX streaming uses the plain growing buffer
-            self._data = buf
-            self._rate = rate
-            self._cap = cap
-            self._filled = 0
-            self._pos = 0
-            self._final = False
-            self._armed = True
-            self._prime = int(prime_frames)
-            self._est_total = 0
-            self._epoch += 1
-            self._state = STOPPED
-            self._loop = self._loop # preserve the user's Loop toggle
-            self._loop_start = 0
-            self._loop_end = 0
-            self._underruns = 0
-            return self._epoch
-
-    def set_estimated_total(self, token, frames):
-        """Set the estimated total length for the seek bar."""
-        with self._lock:
-            if token == self._epoch and not self._final:
-                self._est_total = int(frames)
-
-    def stream_feed(self, chunk):
-        """Append a chunk to the streaming buffer."""
-        if self._data is None:
-            return
-        chunk = np.ascontiguousarray(chunk, dtype=np.int16)
-        if chunk.ndim != 2 or chunk.shape[1] != 2 or len(chunk) == 0:
-            return
-        m = len(chunk)
-        if self._filled + m > self._cap:
-            new_cap = max(self._filled + m, self._cap * 2)
-            new = np.zeros((new_cap, 2), dtype=np.int16)
-            with self._lock:
-                old = self._data
-                filled = self._filled
-            new[:filled] = old[:filled]
-            with self._lock:
-                self._data = new
-                self._cap = new_cap
-        with self._lock:
-            self._data[self._filled:self._filled + m] = chunk
-            self._filled += m
-            if self._armed and self._filled >= self._prime:
-                self._state = PLAYING
-                self._armed = False
-
-    def stream_finalize(self, loop_start=None, loop_end=None):
-        """Mark the streaming render complete."""
-        with self._lock:
-            total = self._filled
-            ls = 0 if loop_start is None else int(loop_start)
-            le = total if loop_end is None else int(loop_end)
-            if not 0 <= ls < le <= total:
-                ls, le = 0, total
-            self._loop_start = ls
-            self._loop_end = le
-            self._final = True
-            self._est_total = 0
-            if self._pos > total:
-                self._pos = total
-            if self._armed:
-                self._state = PLAYING
-                self._armed = False
 
     def play(self):
         """Start, or resume from the current playhead."""
@@ -453,7 +368,6 @@ class _Player:
                 return
             if self._data is not None:
                 self._state = PLAYING
-                self._armed = False
 
     def pause(self):
         with self._lock:
@@ -473,15 +387,12 @@ class _Player:
                 self._cond.notify()
                 return
             self._state = STOPPED
-            self._armed = False
             self._pos = 0
 
     def _total_locked(self):
         if self._data is None:
             return 0
-        if self._final:
-            return self._filled
-        return max(self._est_total, self._filled)
+        return self._filled
 
     def seek(self, frame):
         with self._lock:
@@ -499,10 +410,8 @@ class _Player:
             self._cpos = None
             self._data = None
             self._state = STOPPED
-            self._armed = False
             self._armed_live = False
             self._final = True
-            self._est_total = 0
             self._content_total = 0
             self._epoch += 1
             self._pos = 0
@@ -528,14 +437,14 @@ class _Player:
         """Total length in frames, exact once final else the best estimate."""
         with self._lock:
             if self._live:
-                return max(self._content_total, self._est_total)
+                return self._content_total
             return self._total_locked()
 
     def buffered(self):
         """Frames rendered and playable so far."""
         with self._lock:
             if self._live:
-                return max(self._content_total, self._est_total)
+                return self._content_total
             return 0 if self._data is None else self._filled
 
     def is_final(self):
@@ -586,22 +495,9 @@ def load(audio, rate, loop_start=None, loop_end=None):
     """Load a complete int16 stereo ndarray into the player. Returns success."""
     return _player.load(audio, rate, loop_start, loop_end)
 
-def stream_begin(rate, prime_frames):
-    """Arm a streaming buffer, returns an epoch token or None."""
-    return _player.stream_begin(rate, prime_frames)
-
-def set_estimated_total(token, frames):
-    _player.set_estimated_total(token, frames)
-
-def stream_feed(chunk):
-    _player.stream_feed(chunk)
-
-def stream_finalize(loop_start=None, loop_end=None):
-    _player.stream_finalize(loop_start, loop_end)
-
-def live_begin(rate, est_total=0, loop_marks=None):
+def live_begin(rate, loop_marks=None):
     """Arm live ring playback, returns an epoch token or None."""
-    return _player.live_begin(rate, est_total, loop_marks)
+    return _player.live_begin(rate, loop_marks)
 
 def live_push(token, content_start, block):
     return _player.live_push(token, content_start, block)

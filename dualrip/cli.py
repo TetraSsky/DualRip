@@ -31,6 +31,8 @@ def _progress(done, total, res):
 def _run_nds(args):
     if args.folder is not None:
         print('warning: --folder has no effect on NDS input, ignored (use --archive/--sequence)')
+    if args.group:
+        print('warning: --group has no effect on NDS input, ignored')
 
     if args.file.lower().endswith('.nds'):
         sdats = find_sdats_in_rom(args.file)
@@ -152,6 +154,8 @@ def _run_ctr(args):
         return 1
     if archive is None:
         return 1
+    if args.group:
+        archive.set_prefer_group(args.group)
 
     if args.list:
         print(f'{archive.label}:')
@@ -218,6 +222,7 @@ def main(argv=None):
     ap.add_argument('--rate', type=int, default=44100, help='output sample rate')
     ap.add_argument('--only', type=int, nargs='*', help='render only these entry/sound indices')
     ap.add_argument('--bank-map', default='', help='NDS only: override bank resolution for NULL/dynamic slots, e.g. "4=32" or "4=32+33+43" (candidates tried in order, first full-coverage bank wins). Without this flag, resolution is automatic.',)
+    ap.add_argument('--group', default='', metavar='NAME', help='3DS only: when a bank or wave archive exists in several per-group variants, pick the variant whose group label contains NAME (the error message lists the candidates). Without this flag, such a sound is reported as ambiguous instead of being guessed.',)
     ap.add_argument('--boot9', default=None, metavar='PATH', help='3DS only: console boot ROM dump (boot9.bin), needed to open an encrypted .cia/.3ds. Decrypted ROMs open without it.',)
     ap.add_argument('--version', action='version', version=f'DualRip {__version__}')
     args = ap.parse_args(argv)

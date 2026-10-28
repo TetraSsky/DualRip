@@ -239,6 +239,10 @@ class CtrArchive:
         """Parsed CSEQ events blob of one sequenced sound."""
         return cseq.parse_cseq(self.ctx.file_bytes(s.file_id, 'seq'))[0]
 
+    def set_prefer_group(self, name):
+        """Resolve ambiguous per-group variants towards the group for which label contains name."""
+        self.ctx = cseq.SoundContext(self.csar, self.group_variants, name or None)
+
     def sequence_lookup(self, s):
         """Bank lookup callback of one sequenced sound."""
         return self.ctx.make_lookup(s.bank_ids)
