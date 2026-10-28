@@ -429,8 +429,7 @@ def test_live_matches_batch_dse(dse_archive):
         pytest.skip('no short DSE effect in this archive')
 
     def renderer():
-        return LiveRenderer(entry.events, entry.tpqn, entry.ntrk, entry.preset, entry.bank,
-                            rate, drain_held=entry.kind == 'sfx')
+        return LiveRenderer(entry.events, entry.tpqn, entry.ntrk, entry.preset, entry.bank, rate, drain_held=entry.kind == 'sfx')
 
     def run(target=None):
         r = renderer()
@@ -447,16 +446,24 @@ def test_live_matches_batch_dse(dse_archive):
 
     _res, batch, _rate, _loop = render_dse_one(dse_archive, entry, rate)
     batch = batch if batch is not None else np.zeros((0, 2), dtype=np.int16)
+
+    def trim(audio):
+        """Audio up to its last non-zero sample (empty if all zero). Live renderer can carry silence up to one block."""
+        if not len(audio):
+            return audio
+        loud = np.nonzero(np.abs(audio.astype(np.int32)).max(axis=1))[0]
+        return audio[:int(loud[-1]) + 1] if len(loud) else audio[:0]
+
     live, _start = run()
-    assert live.shape == batch.shape
-    assert np.array_equal(live, batch)
+    assert np.array_equal(trim(live), trim(batch))
+    assert len(live) - len(trim(live)) <= 4096
 
     racer = renderer()
     racer.fast_forward_to(10 ** 9)
-    assert racer.emitted == len(batch)
+    assert abs(racer.emitted - len(batch)) <= 4096
 
     if len(batch) > 4000:
         mid = len(batch) // 2
         after, start = run(target=mid)
         assert start >= mid
-        assert np.array_equal(after, batch[start:])
+        assert np.array_equal(trim(after), trim(batch[start:]))

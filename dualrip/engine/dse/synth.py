@@ -172,7 +172,7 @@ class LiveRenderer:
     """Resumable, seekable driver for one DSE sequence."""
 
     TAIL_SECONDS = 1.5 # release tail after the last event
-    DRAIN_CHUNK = 0.25 # drain step for held one-shot voices
+    DRAIN_CHUNK = 0.01 # drain in 10ms blocks
     DRAIN_CAP = 18.0 # bound on that drain
 
     def __init__(self, events, tpqn, ntrk, preset, bank, out_rate=32728, master=0.7, drain_held=False, block=1024, stats=None):
@@ -201,6 +201,7 @@ class LiveRenderer:
         self.tail_left = int(out_rate * self.TAIL_SECONDS)
         self.drain_left = 0
         self.drained = 0
+        self.audible_end = None # last non-zero sample
         self.phase = 'tail' if not events else 'gap'
         self.emitted = 0
         self.finished = False
@@ -251,6 +252,7 @@ class LiveRenderer:
             'tail_left': self.tail_left,
             'drain_left': self.drain_left,
             'drained': self.drained,
+            'audible_end': self.audible_end,
             'phase': self.phase,
             'emitted': self.emitted,
             'finished': self.finished,
@@ -263,7 +265,7 @@ class LiveRenderer:
         for name in ('events', 'tpqn', 'ntrk', 'preset', 'bank', 'out_rate', 'master',
             'drain_held', 'block', 'prog', 'vol', 'expr', 'pan', 'bend',
             'bpm', 'sounding', 'cur_tick', 'ev_index', 'gap_left', 'tail_left',
-            'drain_left', 'drained', 'phase', 'emitted', 'finished'):
+            'drain_left', 'drained', 'audible_end', 'phase', 'emitted', 'finished'):
             setattr(r, name, snap[name])
         state = (snap['voices'], snap['active'], snap['prog'], snap['vol'], snap['expr'], snap['pan'], snap['bend'])
         memo = cls._share_memo(snap['preset'], snap['bank'])
@@ -354,12 +356,11 @@ class LiveRenderer:
                 self.finished = True
                 return None
             if self.phase == 'gap':
-                n = min(self.gap_left, self.block)
-                self.gap_left -= n
-                if self.gap_left <= 0:
-                    self.cur_tick = self.events[self.ev_index][0]
-                    self.voices = [v for v in self.voices if not v.dead]
-                    self.phase = 'event'
+                n = self.gap_left
+                self.gap_left = 0
+                self.cur_tick = self.events[self.ev_index][0]
+                self.voices = [v for v in self.voices if not v.dead]
+                self.phase = 'event'
                 return self._render(n, produce)
             if self.phase == 'event':
                 self._apply_event()
@@ -367,27 +368,35 @@ class LiveRenderer:
                     self.gap_left = self._gap_samples(self.events[self.ev_index][0] - self.cur_tick)
                     self.phase = 'gap' if self.gap_left > 0 else 'event'
                 else:
-                    self.tail_left = int(self.out_rate * self.TAIL_SECONDS)
-                    self.phase = 'tail'
-                continue
-            if self.phase == 'tail':
-                n = min(self.tail_left, self.block)
-                self.tail_left -= n
-                if self.tail_left <= 0:
                     self.drain_left = 0
-                    self.phase = 'drain' if self.drain_held else 'done'
-                return self._render(n, produce)
+                    self.phase = 'drain'
+                continue
             if self.phase == 'drain':
                 if self.drain_left <= 0:
                     self.voices = [v for v in self.voices if not v.dead]
                     if not self.voices or self.drained >= int(self.out_rate * self.DRAIN_CAP):
                         self.phase = 'done'
+                        if self.audible_end is not None:
+                            self.emitted = self.audible_end
                         continue
                     self.drain_left = int(self.out_rate * self.DRAIN_CHUNK)
                 n = min(self.drain_left, self.block)
                 self.drain_left -= n
                 self.drained += n
-                return self._render(n, produce)
+                start = self.emitted
+                block_out = self._render(n, True)
+                loud = np.nonzero(np.abs(block_out.astype(np.int32)).max(axis=1))[0]
+                if len(loud):
+                    self.audible_end = start + int(loud[-1]) + 1
+                if not any(not v.dead for v in self.voices):
+                    self.phase = 'done'
+                out = block_out
+                if self.phase == 'done':
+                    end = self.audible_end if self.audible_end is not None else start
+                    keep = max(0, end - start)
+                    self.emitted = start + keep
+                    out = block_out[:keep] if keep else None
+                return out if produce else None
 
     def fast_forward_to(self, target_sample):
         """Silent fast-forward until emitted >= target_sample or the render ends."""
@@ -492,20 +501,20 @@ def render(events, tpqn, ntrk, preset, bank, out_rate=32728, master=0.7, drain_h
             if v is not None:
                 v.release()
 
-    render_gap(int(out_rate * 1.5)) # tail for releases
-    if drain_held:
-        # ring out held one-shot voices to their natural end; cap bounds looping holds
+    chunk = int(out_rate * 0.01) # same step as LiveRenderer both identical
+    cap = int(out_rate * 18)
+    drained = 0
+    voices[:] = [v for v in voices if not v.dead]
+    while voices and drained < cap:
+        render_gap(chunk)
+        drained += chunk
         voices[:] = [v for v in voices if not v.dead]
-        chunk = int(out_rate * 0.25)
-        cap = int(out_rate * 18)
-        drained = 0
-        while voices and drained < cap:
-            render_gap(chunk)
-            drained += chunk
-            voices[:] = [v for v in voices if not v.dead]
     if not blocks:
         return np.zeros((0, 2), dtype=np.int16)
     audio = np.concatenate(blocks, axis=0)
     audio *= master
     np.clip(audio, -32768, 32767, out=audio)
-    return audio.astype(np.int16)
+    audio = audio.astype(np.int16)
+    loud = np.nonzero(np.abs(audio.astype(np.int32)).max(axis=1))[0]
+    end = int(loud[-1]) + 1 if len(loud) else 0
+    return audio[:end]
