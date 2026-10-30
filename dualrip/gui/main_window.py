@@ -76,12 +76,13 @@ STATUSBAR_MSG_LEFT = 6
 RECENT_MAX = 8
 
 # NDS: 'sdat' | 'cat' | 'seqcat' | 'arc' | 'entry' | 'seq' | 'bank' | 'war'
-# 3DS: 'csar' | 'carc'| 'centry' | 'cstrmcat' | 'cbank' | 'cwarv'
+# 3DS: 'csar' | 'carc'| 'centry' | 'cstrmlayer' | 'cstrmcat' | 'cbank' | 'cwarv'
 ROLE_KIND = Qt.UserRole
 ROLE_ARC = Qt.UserRole + 1
 ROLE_INDEX = Qt.UserRole + 2
 ROLE_SDAT = Qt.UserRole + 3 # sdat_key on every item, identifies owning SdatFile
 ROLE_KFILTER = Qt.UserRole + 4
+ROLE_LAYER = Qt.UserRole + 5 # stereo layer index on a stream layer item
 
 
 class MainWindow(QMainWindow):
@@ -499,7 +500,10 @@ class MainWindow(QMainWindow):
                 if not chosen:
                     raise ValueError('No CSAR selected.')
         self._clear_all()
+        group = load_settings()['group']
         for i, arch in enumerate(chosen):
+            if group:
+                arch.set_prefer_group(group)
             self._sdats[str(i)] = (arch.label, arch)
         self._sdat_path = path
         self._generation += 1
@@ -509,6 +513,9 @@ class MainWindow(QMainWindow):
     def _open_bcsar_file(self, path):
         """Open a loose .bcsar."""
         arch = open_bcsar(path)
+        group = load_settings()['group']
+        if group:
+            arch.set_prefer_group(group)
         self._clear_all()
         self._sdats['0'] = (arch.label, arch)
         self._sdat_path = path
@@ -766,6 +773,20 @@ class MainWindow(QMainWindow):
             it.setData(0, ROLE_SDAT, sdat_key)
             self._item_index[(sdat_key, 'ctr', s.index)] = it
             parent.addChild(it)
+            # a multi-channel stream holds one stereo layer per channel pair
+            try:
+                layers = arch.stream_layers(s) if arch.kind_label(s) == 'strm' else 1
+            except (LookupError, ValueError):
+                layers = 1
+            for k in range(layers if layers > 1 else 0):
+                child = QTreeWidgetItem([f'c{2 * k}-{2 * k + 1}', '', ''])
+                child.setData(0, ROLE_KIND, 'cstrmlayer')
+                child.setData(0, ROLE_ARC, folder)
+                child.setData(0, ROLE_INDEX, s.index)
+                child.setData(0, ROLE_LAYER, k)
+                child.setData(0, ROLE_SDAT, sdat_key)
+                self._item_index[(sdat_key, 'ctr', s.index, k)] = child
+                it.addChild(child)
 
         def bank_info(s):
             """Info text for a CSEQ's bank references."""
@@ -812,8 +833,13 @@ class MainWindow(QMainWindow):
             cat_strm.setData(0, ROLE_KIND, 'cstrmcat')
             cat_strm.setData(0, ROLE_ARC, 'STRM')
             cat_strm.setData(0, ROLE_SDAT, sdat_key)
-            for s in streams:
-                add_centry(cat_strm, 'STRM', s)
+            if arch.csar is None:
+                # loose RomFS streams keep one flat folder, sorted by directory then name
+                for s in sorted(streams, key=lambda x: (arch.stream_dir(x.index), x.name)):
+                    add_centry(cat_strm, 'STRM', s, arch.stream_dir(s.index).lstrip('/'))
+            else:
+                for s in streams:
+                    add_centry(cat_strm, 'STRM', s)
             root.addChild(cat_strm)
 
         def war_info(i):
@@ -1054,14 +1080,21 @@ class MainWindow(QMainWindow):
     def _current_ctr_sound(self):
         """(archive, sdat_key, sound) for the current 3DS item, or Nones."""
         it = self.tree.currentItem()
-        if it is None or not self._sdats or it.data(0, ROLE_KIND) != 'centry':
+        if it is None or not self._sdats or it.data(0, ROLE_KIND) not in ('centry', 'cstrmlayer'):
             return None, None, None
         sk = self._sdat_key_for(it)
         arch = self._sdats[sk][1]
         return arch, sk, arch.sound(it.data(0, ROLE_INDEX))
 
-    def _ctr_cache_key(self, sk, sound):
-        return (self._generation, sk, 'ctr', sound.index, self.settings['rate'])
+    def _current_ctr_layer(self):
+        """Stereo layer index of the current 3DS stream item, or None."""
+        it = self.tree.currentItem()
+        if it is None or it.data(0, ROLE_KIND) != 'cstrmlayer':
+            return None
+        return it.data(0, ROLE_LAYER)
+
+    def _ctr_cache_key(self, sk, sound, layer=None):
+        return (self._generation, sk, 'ctr', sound.index, self.settings['rate'], layer)
 
     def _current_dse_sound(self):
         """(archive, sdat_key, entry) for the current DSE item, or Nones."""
@@ -1082,7 +1115,7 @@ class MainWindow(QMainWindow):
             return self._cache_key(sk, seqarc, entry)
         _arch, sk, sound = self._current_ctr_sound()
         if sound is not None:
-            return self._ctr_cache_key(sk, sound)
+            return self._ctr_cache_key(sk, sound, self._current_ctr_layer())
         _arch, sk, dentry = self._current_dse_sound()
         if dentry is not None:
             return self._dse_cache_key(sk, dentry)
@@ -1097,7 +1130,7 @@ class MainWindow(QMainWindow):
             return
         sdat = self._sdat_for(it)
         kind = it.data(0, ROLE_KIND)
-        self.player.setVisible(kind in ('entry', 'seq', 'centry', 'dseq', 'strm'))
+        self.player.setVisible(kind in ('entry', 'seq', 'centry', 'cstrmlayer', 'dseq', 'strm'))
         for lbl in (
             self.lbl_bank,
             self.lbl_format,
@@ -1142,19 +1175,23 @@ class MainWindow(QMainWindow):
             if vol is not None:
                 self.lbl_volume.setText(str(vol))
             self._show_render(self._cache.get(self._strm_cache_key(sk, stream_id)))
-        elif kind == 'centry':
+        elif kind in ('centry', 'cstrmlayer'):
             arch, sk, sound = self._current_ctr_sound()
             kl = arch.kind_label(sound)
+            layer = self._current_ctr_layer()
             self.lbl_name.setText(sound.name)
             self.lbl_kind.setText(KIND_TITLE[kl])
             idx, setname = self._ctr_folder_parts(arch, it.data(0, ROLE_ARC))
             folder = arch.stream_dir(sound.index).lstrip('/')
             if folder:
-                self.lbl_where.setText(f'{folder} [{sound.index}]')
+                where = f'{folder} [{sound.index}]'
             elif idx is not None:
-                self.lbl_where.setText(f'{idx:03d} {setname} [{sound.index}]')
+                where = f'{idx:03d} {setname} [{sound.index}]'
             else:
-                self.lbl_where.setText(f'{CTR_SOUND_NOUN[kl]} {sound.index}')
+                where = f'{CTR_SOUND_NOUN[kl]} {sound.index}'
+            if layer is not None:
+                where += f', c{2 * layer}-{2 * layer + 1}'
+            self.lbl_where.setText(where)
             if kl == 'seq' and sound.bank_ids:
                 shown = ', '.join(self._ctr_bank_label(arch, b) for b in sound.bank_ids if b != 0xFFFFFF)
                 self.lbl_bank.setText(shown or '-')
@@ -1162,7 +1199,15 @@ class MainWindow(QMainWindow):
                 self.lbl_format.setText(self._stream_format_label(arch.stream_format(sound)))
             if sound.volume is not None:
                 self.lbl_volume.setText(str(sound.volume))
-            self._show_render(self._cache.get(self._ctr_cache_key(sk, sound)))
+            self._show_render(self._cache.get(self._ctr_cache_key(sk, sound, layer)))
+            if kl == 'strm' and layer is None:
+                layers = arch.stream_layers(sound)
+                if layers > 1:
+                    info = arch.stream_info(sound)
+                    if info.sample_rate:
+                        dur = info.sample_count / info.sample_rate
+                        self.lbl_duration.setText(f'{dur:.3f}s')
+                        self.lbl_loop.setText(f'{info.loop_start / info.sample_rate:.3f}s - {dur:.3f}s' if info.loop_flag else 'none')
         elif kind == 'dseq':
             arch, sk, entry = self._current_dse_sound()
             self.lbl_name.setText(entry.name)
@@ -1382,7 +1427,11 @@ class MainWindow(QMainWindow):
 
     def _on_loaded_changed(self, key):
         """Bold the tree row matching the player's loaded track."""
-        item = None if key is None else self._item_index.get(tuple(key[1:4]))
+        item = None
+        if key is not None:
+            base = tuple(key[1:4])
+            layer = key[5] if len(key) > 5 else None
+            item = self._item_index.get(base + (layer,)) if layer is not None else self._item_index.get(base)
         self._set_playing_item(item)
 
     def _set_playing_item(self, item):
@@ -1490,7 +1539,14 @@ class MainWindow(QMainWindow):
 
     def _play_ctr(self, archive, sk, sound):
         """Play a 3DS CSAR sound: cached audio, seamless sequence preview, or one-shot render."""
-        key = self._ctr_cache_key(sk, sound)
+        layer = self._current_ctr_layer()
+        key = self._ctr_cache_key(sk, sound, layer)
+        if archive.kind_label(sound) == 'strm' and layer is None:
+            layers = archive.stream_layers(sound)
+            if layers > 1:
+                names = ', '.join(f'c{2 * k}-{2 * k + 1}' for k in range(layers))
+                self.statusBar().showMessage(f'{sound.name}: {layers} stereo layers ({names}), select one')
+                return
         if archive.kind_label(sound) == 'seq':
             if self.player.loaded_key == key and audio.is_live():
                 audio.request_seek(0)
@@ -1509,8 +1565,9 @@ class MainWindow(QMainWindow):
             return
         self._cancel_preview()
         audio.unload()
-        self._show_render_progress(sound.name)
-        worker = CtrPreviewWorker(key, archive, sound, self.settings['rate'])
+        label = sound.name if layer is None else f'{sound.name} c{2 * layer}-{2 * layer + 1}'
+        self._show_render_progress(label)
+        worker = CtrPreviewWorker(key, archive, sound, self.settings['rate'], layer)
         worker.done.connect(self._ctr_preview_done)
         worker.failed.connect(self._preview_failed)
         self._preview_worker = worker
@@ -1615,6 +1672,10 @@ class MainWindow(QMainWindow):
             self._show_render(res)
         if res.audio is not None and len(res.audio):
             self._play(key, res)
+            layer = key[5] if len(key) > 5 else None
+            if layer is not None:
+                # which stereo layer is playing
+                self.statusBar().showMessage(f'{res.name} c{2 * layer}-{2 * layer + 1}: {res.duration:.2f}s')
         else:
             self.player.clear()
             self.statusBar().showMessage(f'{res.name}: {res.status} ({res.error})' if res.error else '')
@@ -1696,7 +1757,7 @@ class MainWindow(QMainWindow):
             if sk is None:
                 continue
             if sk not in per_sdat:
-                per_sdat[sk] = {'whole': set(), 'partial': {}, 'seq': set(), 'all_seqs': False, 'strm': set(), 'all_strms': False}
+                per_sdat[sk] = {'whole': set(), 'partial': {}, 'seq': set(), 'all_seqs': False, 'strm': set(), 'all_strms': False, 'layers': {}, 'containers': set()}
             p = per_sdat[sk]
             kind = it.data(0, ROLE_KIND)
             if kind == 'arc' or kind == 'cstrmcat' or kind == 'dseqcat':
@@ -1707,9 +1768,18 @@ class MainWindow(QMainWindow):
                 kfilter = it.data(0, ROLE_KFILTER)
                 idxs = {s.index for s in sdat.folders[arc] if s.kind == kfilter}
                 p['partial'].setdefault(arc, set()).update(idxs)
+            elif kind == 'cstrmlayer':
+                # a layer selects its stream and narrows the export to that pair
+                arc = it.data(0, ROLE_ARC)
+                idx = it.data(0, ROLE_INDEX)
+                p['partial'].setdefault(arc, set()).add(idx)
+                p['layers'].setdefault(arc, {}).setdefault(idx, set()).add(it.data(0, ROLE_LAYER))
             elif kind in ('entry', 'centry', 'dseq'):
                 arc = it.data(0, ROLE_ARC)
-                p['partial'].setdefault(arc, set()).add(it.data(0, ROLE_INDEX))
+                idx = it.data(0, ROLE_INDEX)
+                p['partial'].setdefault(arc, set()).add(idx)
+                # the container wins: selecting it exports every layer
+                p['containers'].add((arc, idx))
             elif kind == 'seq':
                 p['seq'].add(it.data(0, ROLE_INDEX))
             elif kind == 'seqcat':
@@ -1723,19 +1793,22 @@ class MainWindow(QMainWindow):
             # 3DS/DSE folders are keyed by name, DS archives by id
             obj = self._sdats[sk][1]
             arc_kind = 'dse' if isinstance(obj, DseArchive) else ('carc' if isinstance(obj, CtrArchive) else 'arc')
+            # selected container exports every layer of its stream
+            for arc, idx in p['containers']:
+                p['layers'].get(arc, {}).pop(idx, None)
             for a in sorted(p['whole']):
-                jobs.append((sk, arc_kind, a, None))
+                jobs.append((sk, arc_kind, a, None, None))
             for a, idxs in sorted(p['partial'].items()):
                 if a not in p['whole']:
-                    jobs.append((sk, arc_kind, a, idxs))
+                    jobs.append((sk, arc_kind, a, idxs, p['layers'].get(a) or None))
             if p['all_seqs']:
-                jobs.append((sk, 'seq', None, None))
+                jobs.append((sk, 'seq', None, None, None))
             elif p['seq']:
-                jobs.append((sk, 'seq', None, p['seq']))
+                jobs.append((sk, 'seq', None, p['seq'], None))
             if p['all_strms']:
-                jobs.append((sk, 'strm', None, None))
+                jobs.append((sk, 'strm', None, None, None))
             elif p['strm']:
-                jobs.append((sk, 'strm', None, p['strm']))
+                jobs.append((sk, 'strm', None, p['strm'], None))
         return jobs
 
     def export_selection(self):
@@ -1753,18 +1826,18 @@ class MainWindow(QMainWindow):
         for sk, (_label, sdat) in self._sdats.items():
             if isinstance(sdat, DseArchive):
                 for folder in sdat.folders:
-                    jobs.append((sk, 'dse', folder, None))
+                    jobs.append((sk, 'dse', folder, None, None))
                 continue
             if isinstance(sdat, CtrArchive):
                 for folder in sdat.folders:
-                    jobs.append((sk, 'carc', folder, None))
+                    jobs.append((sk, 'carc', folder, None, None))
                 continue
             for i, _n, _c in sdat.seqarc_list:
-                jobs.append((sk, 'arc', i, None))
+                jobs.append((sk, 'arc', i, None, None))
             if sdat.sequence_list:
-                jobs.append((sk, 'seq', None, None))
+                jobs.append((sk, 'seq', None, None, None))
             if sdat.stream_list:
-                jobs.append((sk, 'strm', None, None))
+                jobs.append((sk, 'strm', None, None, None))
         self._open_export(jobs)
 
     def _open_export(self, jobs):
@@ -1780,11 +1853,16 @@ class MainWindow(QMainWindow):
             if (
                 old['rate'] != self.settings['rate']
                 or old['bank_map'] != self.settings['bank_map']
+                or old.get('group', '') != self.settings.get('group', '')
             ):
                 self._cancel_preview()
                 self._cache.clear()
                 self._resolvers.clear()
                 self.player.clear()
+                # a group change re-targets the variant resolution of every CSAR
+                for _label, sdat in self._sdats.values():
+                    if isinstance(sdat, CtrArchive):
+                        sdat.set_prefer_group(self.settings.get('group', ''))
             self.statusBar().showMessage('Settings saved.')
 
     def show_about(self):

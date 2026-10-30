@@ -297,12 +297,12 @@ def _ctr_empty_reason(sound, stats):
         return 'entry volume zero'
     return ''
 
-def render_ctr_one(archive, sound, rate, keep_audio=True):
-    """Render one CSAR sound in memory."""
+def render_ctr_one(archive, sound, rate, keep_audio=True, layer=None):
+    """Render one CSAR sound in memory or one stereo layer of a multi-channel stream."""
     from .formats.ctr import KIND_LABEL
     stats = {}
     try:
-        native_rate, chans, loop = archive.render(sound, rate, stats)
+        native_rate, chans, loop = archive.render(sound, rate, stats, layer=layer)
     except (LookupError, ValueError, NotImplementedError) as exc:
         return (RenderResult(sound.index, sound.name, 'error', error=str(exc)), None, None, None)
     n = len(chans[0]) if chans else 0
@@ -324,10 +324,13 @@ def rip_ctr_folder(
     out_root,
     rate=32728,
     only=None,
+    layers=None,
+    stream_mode='multiple',
+    all_groups=False,
     progress=None,
     should_cancel=None,
 ):
-    """Rip one CSAR sound folder to WAV and manifest.csv."""
+    """Rip one CSAR sound folder to WAV and manifest.csv (stream_mode: multiple, single or both)."""
     from .formats.ctr import KIND_LABEL, cstm
 
     members = archive.folders[folder]
@@ -339,19 +342,96 @@ def rip_ctr_folder(
     counts = {'ok': 0, 'loop': 0, 'empty': 0, 'null': 0, 'error': 0}
     cancelled = False
     unapplied_before = dict(archive.unapplied)
+    mode = stream_mode or 'multiple'
+
+    def stream_files(sound):
+        """Files one stream produces under the chosen mode."""
+        n = archive.stream_layers(sound) if KIND_LABEL[sound.kind] == 'strm' else 1
+        if n <= 1:
+            return 1
+        wanted = (layers or {}).get(sound.index)
+        n = len(wanted) if wanted else n
+        return n if mode == 'multiple' else (1 if mode == 'single' else n + 1)
+
+    total_files = sum(stream_files(s) for s in todo)
+    written = 0
     for done, sound in enumerate(todo, 1):
         res, chans, native_rate, loop = render_ctr_one(
             archive, sound, rate, keep_audio=False)
-        counts[res.status] += 1
-        if res.status != 'error':
-            fn = sanitize(sound.name) + '.wav'
-            cstm.write_wav(os.path.join(out_dir, fn), chans, native_rate, loop)
-        peak = max((abs(x) for ch in (chans or []) for x in ch), default=0)
-        manifest.append(manifest_row(
-            sound.index, res, KIND_LABEL[sound.kind], _ctr_bank_cell(sound),
-            sound.volume, peak))
-        if progress is not None:
-            progress(done, len(todo), res)
+        files = 0
+        if all_groups and res.status == 'error' and ' one of: ' in (res.error or ''):
+            # a bank exists in several per-group variants: write the sound once per variant
+            labels = res.error.split(' one of: ', 1)[1].split(', ')
+            previous = getattr(archive.ctx, 'prefer_group', None)
+            for label in labels:
+                archive.set_prefer_group(label)
+                sub, sub_chans, sub_rate, sub_loop = render_ctr_one(
+                    archive, sound, rate, keep_audio=False)
+                if sub.status not in ('ok', 'loop'):
+                    continue
+                fn = f'{sanitize(sound.name)}__{sanitize(label)}.wav'
+                cstm.write_wav(os.path.join(out_dir, fn), sub_chans, sub_rate, sub_loop)
+                peak = max((abs(x) for ch in (sub_chans or []) for x in ch), default=0)
+                row = manifest_row(sound.index, sub, KIND_LABEL[sound.kind], _ctr_bank_cell(sound), sound.volume, peak)
+                row[1] = f'{sound.name} ({label})'
+                manifest.append(row)
+                counts[sub.status] += 1
+                files += 1
+                written += 1
+                total_files += 1 # variants are discovered while ripping, keep done/total coherent
+                if progress is not None:
+                    progress(written, total_files, sub)
+            archive.set_prefer_group(previous)
+        elif res.status in ('ok', 'loop'):
+            wanted = (layers or {}).get(sound.index)
+            total_layers = archive.stream_layers(sound) if KIND_LABEL[sound.kind] == 'strm' else 1
+            if total_layers > 1:
+                # multichannel file keeps every layer in channel order
+                if mode in ('single', 'both'):
+                    fn = sanitize(sound.name) + '.wav'
+                    cstm.write_wav(os.path.join(out_dir, fn), chans, native_rate, loop)
+                    peak = max((abs(x) for ch in (chans or []) for x in ch), default=0)
+                    row = manifest_row(
+                        sound.index, res, KIND_LABEL[sound.kind], _ctr_bank_cell(sound),
+                        sound.volume, peak)
+                    row[1] = f'{sound.name} ({total_layers * 2} ch)'
+                    manifest.append(row)
+                    counts[res.status] += 1
+                    files += 1
+                    written += 1
+                    if progress is not None:
+                        progress(written, total_files, res)
+                if mode in ('multiple', 'both'):
+                    for k in (sorted(wanted) if wanted else range(total_layers)):
+                        _res, pair, pair_rate, pair_loop = render_ctr_one(archive, sound, rate, keep_audio=False, layer=k)
+                        fn = f'{sanitize(sound.name)}_c{2 * k}-{2 * k + 1}.wav'
+                        cstm.write_wav(os.path.join(out_dir, fn), pair, pair_rate, pair_loop)
+                        peak = max((abs(x) for ch in (pair or []) for x in ch), default=0)
+                        row = manifest_row(sound.index, _res, KIND_LABEL[sound.kind], _ctr_bank_cell(sound), sound.volume, peak)
+                        row[1] = f'{sound.name} (ch {2 * k}-{2 * k + 1})'
+                        manifest.append(row)
+                        counts[_res.status] += 1
+                        files += 1
+                        written += 1
+                        if progress is not None:
+                            progress(written, total_files, _res)
+            else:
+                fn = sanitize(sound.name) + '.wav'
+                cstm.write_wav(os.path.join(out_dir, fn), chans, native_rate, loop)
+                peak = max((abs(x) for ch in (chans or []) for x in ch), default=0)
+                manifest.append(manifest_row(
+                    sound.index, res, KIND_LABEL[sound.kind], _ctr_bank_cell(sound),
+                    sound.volume, peak))
+                counts[res.status] += 1
+                files = 1
+                written += 1
+        if not files:
+            manifest.append(manifest_row(
+                sound.index, res, KIND_LABEL[sound.kind], _ctr_bank_cell(sound),
+                sound.volume, _peak(res)))
+            counts[res.status] += 1
+            if progress is not None:
+                progress(written, total_files, res)
         if should_cancel is not None and should_cancel():
             cancelled = True
             break
@@ -409,7 +489,7 @@ def rip_streams(sdat, stream_ids, out_root, progress=None, should_cancel=None):
         name = names.get(sid, f'STRM_{sid}')
         res, audio, native_rate, loop = render_strm_one(sdat, sid, name)
         counts[res.status] += 1
-        if res.status != 'error':
+        if res.status in ('ok', 'loop'):
             fn = f'{sid:03d}_{sanitize(name)}.wav'
             write_wav_channels(os.path.join(out_dir, fn), audio, native_rate, loop)
         manifest.append(manifest_row(sid, res, 'strm', '', volumes.get(sid), _peak(res)))
@@ -473,7 +553,7 @@ def rip_dse_folder(archive, folder, out_root, rate=32728, only=None, progress=No
     for done, entry in enumerate(todo, 1):
         res, audio, out_rate, loop = render_dse_one(archive, entry, rate, keep_audio=False)
         counts[res.status] += 1
-        if res.status != 'error':
+        if res.status in ('ok', 'loop'):
             name = sanitize(entry.name)
             if name in seen:
                 name = '%s_%d' % (name, entry.index)

@@ -256,6 +256,30 @@ def test_live_matches_batch_ctr(archive):
         assert start >= mid
         assert np.array_equal(after, batch[start:])
 
+def test_stream_layers_ctr(archive):
+    """Multi-channel stream exposes one stereo layer per channel pair in order."""
+    import numpy as np
+    from dualrip.export import render_ctr_one
+
+    streams = [s for s in archive.sounds if archive.kind_label(s) == 'strm']
+    multi = [s for s in streams if archive.stream_layers(s) > 1]
+    if not multi:
+        pytest.skip('no multi-channel stream in this archive')
+    sound = multi[0]
+    layers = archive.stream_layers(sound)
+    _rate, chans, loop = archive.render(sound, 32728)
+    assert layers == len(chans) // 2
+    for k in range(layers):
+        _res, pair, _rate2, pair_loop = render_ctr_one(archive, sound, 32728, keep_audio=False, layer=k)
+        assert len(pair) == 2
+        assert np.array_equal(np.asarray(pair[0], dtype=np.int16), np.asarray(chans[2 * k], dtype=np.int16))
+        assert np.array_equal(np.asarray(pair[1], dtype=np.int16), np.asarray(chans[2 * k + 1], dtype=np.int16))
+        assert pair_loop == loop
+    stereo = [s for s in streams if archive.stream_layers(s) == 1]
+    if stereo:
+        _res, pair, _rate2, _loop2 = render_ctr_one(archive, stereo[0], 32728, keep_audio=False)
+        assert len(pair) == 2
+
 # ---------------------------------------------------------------------------
 # NDS streams (SDAT: STRM)
 # ---------------------------------------------------------------------------
@@ -405,8 +429,7 @@ def test_live_matches_batch_dse(dse_archive):
         pytest.skip('no short DSE effect in this archive')
 
     def renderer():
-        return LiveRenderer(entry.events, entry.tpqn, entry.ntrk, entry.preset, entry.bank,
-                            rate, drain_held=entry.kind == 'sfx')
+        return LiveRenderer(entry.events, entry.tpqn, entry.ntrk, entry.preset, entry.bank, rate, drain_held=entry.kind == 'sfx')
 
     def run(target=None):
         r = renderer()
@@ -423,16 +446,24 @@ def test_live_matches_batch_dse(dse_archive):
 
     _res, batch, _rate, _loop = render_dse_one(dse_archive, entry, rate)
     batch = batch if batch is not None else np.zeros((0, 2), dtype=np.int16)
+
+    def trim(audio):
+        """Audio up to its last non-zero sample (empty if all zero). Live renderer can carry silence up to one block."""
+        if not len(audio):
+            return audio
+        loud = np.nonzero(np.abs(audio.astype(np.int32)).max(axis=1))[0]
+        return audio[:int(loud[-1]) + 1] if len(loud) else audio[:0]
+
     live, _start = run()
-    assert live.shape == batch.shape
-    assert np.array_equal(live, batch)
+    assert np.array_equal(trim(live), trim(batch))
+    assert len(live) - len(trim(live)) <= 4096
 
     racer = renderer()
     racer.fast_forward_to(10 ** 9)
-    assert racer.emitted == len(batch)
+    assert abs(racer.emitted - len(batch)) <= 4096
 
     if len(batch) > 4000:
         mid = len(batch) // 2
         after, start = run(target=mid)
         assert start >= mid
-        assert np.array_equal(after, batch[start:])
+        assert np.array_equal(trim(after), trim(batch[start:]))

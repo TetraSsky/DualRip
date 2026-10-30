@@ -71,7 +71,7 @@ class Sample:
 
 class Split:
     """One prgi split: a key/velocity range mapped to a sample with an envelope."""
-    __slots__ = ('low_key', 'high_key', 'low_vel', 'high_vel', 'sample_id', 'fine_tune', 'coarse_tune', 'root_key', 'volume', 'pan', 'env_on', 'env_mult', 'atk_vol', 'attack', 'decay', 'sustain', 'hold', 'decay2', 'release')
+    __slots__ = ('low_key', 'high_key', 'low_vel', 'high_vel', 'sample_id', 'bend_range', 'fine_tune', 'coarse_tune', 'root_key', 'volume', 'pan', 'env_on', 'env_mult', 'atk_vol', 'attack', 'decay', 'sustain', 'hold', 'decay2', 'release')
 
 class Program:
     """One prgi program: volume, pan, and a list of splits."""
@@ -160,6 +160,7 @@ class Swdl:
                 base_s = so + k * 0x30
                 sp = Split()
                 sp.sample_id = struct.unpack_from('<H', data, base_s + 0x12)[0]
+                sp.bend_range = data[base_s + 0x02] # pitch bend range, overridden per track by 0xDB
                 sp.low_key, sp.high_key = struct.unpack_from('<2b', data, base_s + 0x04)
                 sp.low_vel, sp.high_vel = struct.unpack_from('<2b', data, base_s + 0x08)
                 sp.fine_tune, sp.coarse_tune, sp.root_key = struct.unpack_from('<3b', data, base_s + 0x14)

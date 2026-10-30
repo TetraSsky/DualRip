@@ -242,12 +242,13 @@ class CtrPreviewWorker(_ThreadWorker):
     done = Signal(object, object)
     failed = Signal(object, str)
 
-    def __init__(self, key, archive, sound, rate, parent=None):
+    def __init__(self, key, archive, sound, rate, layer=None, parent=None):
         super().__init__(parent)
         self._key = key
         self._archive = archive
         self._sound = sound
         self._rate = rate
+        self._layer = layer
         self._cancel = threading.Event()
 
     def cancel(self):
@@ -256,7 +257,7 @@ class CtrPreviewWorker(_ThreadWorker):
     def _run(self):
         try:
             res, _chans, _native_rate, _loop = render_ctr_one(
-                self._archive, self._sound, self._rate)
+                self._archive, self._sound, self._rate, layer=self._layer)
         except Exception as exc:
             self._emit(self.failed, self._key, str(exc))
             return
@@ -600,13 +601,15 @@ class BatchWorker(_ThreadWorker):
     batch_done = Signal(object) # list of summaries
     failed = Signal(str)
 
-    def __init__(self, sdats, jobs, out_root, rate, override_map=None, parent=None):
+    def __init__(self, sdats, jobs, out_root, rate, override_map=None, stream_mode='multiple', group_all=False, parent=None):
         super().__init__(parent)
         self._sdats = sdats
         self._jobs = jobs
         self._out_root = out_root
         self._rate = rate
         self._override = override_map
+        self._stream_mode = stream_mode
+        self._group_all = group_all
         self._cancel = threading.Event()
 
     def cancel(self):
@@ -626,14 +629,36 @@ class BatchWorker(_ThreadWorker):
             return sorted(sel)
         return [sid for sid, _n, _v in self._sdat(sk).stream_list]
 
-    def _job_size(self, sk, kind, ident, sel):
+    def _job_size(self, sk, kind, ident, sel, layers=None):
         if kind == 'seq':
             return len(self._seq_ids(sk, sel))
         if kind == 'strm':
             return len(self._strm_ids(sk, sel))
+        if kind == 'carc':
+            # files written, so a multi-layer stream counts for what it produces
+            sdat = self._sdat(sk)
+            members = sdat.folders[ident]
+            if sel is not None:
+                members = [s for s in members if s.index in sel]
+            total = 0
+            for s in members:
+                if sdat.kind_label(s) != 'strm':
+                    total += 1
+                    continue
+                only = (layers or {}).get(s.index)
+                n = len(only) if only else sdat.stream_layers(s)
+                if n <= 1:
+                    total += 1
+                elif self._stream_mode == 'multiple':
+                    total += n
+                elif self._stream_mode == 'single':
+                    total += 1
+                else:
+                    total += n + 1
+            return total
         if sel is not None:
             return len(sel)
-        if kind == 'carc' or kind == 'dse':
+        if kind == 'dse':
             return len(self._sdat(sk).folders[ident])
         return len(self._sdat(sk).seqarc(ident).entries)
 
@@ -643,9 +668,10 @@ class BatchWorker(_ThreadWorker):
             audio.pause()
         try:
             summaries = []
-            grand_total = sum(self._job_size(j[0], j[1], j[2], j[3]) for j in self._jobs)
+            grand_total = sum(self._job_size(j[0], j[1], j[2], j[3], j[4] if len(j) > 4 else None)
+                              for j in self._jobs)
             base = 0
-            for sk, kind, ident, sel in self._jobs:
+            for sk, kind, ident, sel, layers in self._jobs:
                 if self._cancel.is_set():
                     break
                 sdat = self._sdat(sk)
@@ -660,6 +686,9 @@ class BatchWorker(_ThreadWorker):
                         self._out_root,
                         rate=self._rate,
                         only=sel,
+                        layers=layers,
+                        stream_mode=self._stream_mode,
+                        all_groups=self._group_all,
                         progress=progress,
                         should_cancel=self._cancel.is_set,
                     )
@@ -704,7 +733,7 @@ class BatchWorker(_ThreadWorker):
                     )
                 summaries.append(summary)
                 self._emit(self.archive_done, summary)
-                base += self._job_size(sk, kind, ident, sel)
+                base += self._job_size(sk, kind, ident, sel, layers)
             self._emit(self.batch_done, summaries)
         except Exception as exc:
             self._emit(self.failed, str(exc))

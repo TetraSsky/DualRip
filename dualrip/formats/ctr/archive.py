@@ -239,17 +239,36 @@ class CtrArchive:
         """Parsed CSEQ events blob of one sequenced sound."""
         return cseq.parse_cseq(self.ctx.file_bytes(s.file_id, 'seq'))[0]
 
+    def set_prefer_group(self, name):
+        """Resolve ambiguous per-group variants towards the group for which label contains name."""
+        self.ctx = cseq.SoundContext(self.csar, self.group_variants, name or None)
+
     def sequence_lookup(self, s):
         """Bank lookup callback of one sequenced sound."""
         return self.ctx.make_lookup(s.bank_ids)
 
-    def render(self, s, rate, stats=None):
+    def stream_info(self, s):
+        """Parsed header of a streamed sound (codec, channels, rate, samples, loop)."""
+        return cstm.StreamInfo(self._stream_bytes(s))
+
+    def stream_channels(self, s):
+        """Channel count of a streamed sound, read from its header."""
+        return cstm.StreamInfo(self._stream_bytes(s)).num_channels
+
+    def stream_layers(self, s):
+        """Stereo layers of a streamed sound: one pair per layer, in channel order."""
+        return max(1, self.stream_channels(s) // 2)
+
+    def render(self, s, rate, stats=None, layer=None):
         """Render one sound to (native_rate, chans, loop); stats collects silent-entry facts."""
         kind = KIND_LABEL[s.kind]
         if kind == 'strm':
             data = self._stream_bytes(s)
             info, chans = cstm.decode_cstm(data)
             loop = (info.loop_start, info.sample_count) if info.loop_flag else None
+            if layer is not None:
+                # one stereo layer of a multi-channel stream
+                chans = chans[2 * layer:2 * layer + 2]
             return info.sample_rate, chans, loop
         if kind == 'seq':
             blob, _labels = cseq.parse_cseq(self.ctx.file_bytes(s.file_id, 'seq'))
