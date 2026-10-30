@@ -14,3 +14,7 @@ jobs:
         env:
           DUALRIP_TEST_SDAT: ${{ secrets.DUALRIP_TEST_SDAT }}
           DUALRIP_TEST_CTR: ${{ secrets.DUALRIP_TEST_CTR }}
+          DUALRIP_TEST_BOOT9: ${{ secrets.DUALRIP_TEST_BOOT9 }}
+          DUALRIP_TEST_STRM: ${{ secrets.DUALRIP_TEST_STRM }}
+          DUALRIP_TEST_STRM_PCM8: ${{ secrets.DUALRIP_TEST_STRM_PCM8 }}
+          DUALRIP_TEST_DSE: ${{ secrets.DUALRIP_TEST_DSE }}

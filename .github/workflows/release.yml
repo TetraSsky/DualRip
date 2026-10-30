@@ -57,6 +57,12 @@ jobs:
             - manifest.csv has the same columns in every format (`index, name, kind, bank, entry_volume, duration_s, peak, loop_start_s, loop_end_s, status`).
             - NULL/dynamic bank slots resolved automatically per entry (--bank-map to override).
             - GUI: archive browser with filter and grouping, preview player (seek / pause / loop on the sound's own loop points), multi-select batch export with a live log.
+            - One live preview path for every sequenced format (SSAR, SSEQ, CSEQ, SMDL, SEDL): seeking lands instantly and the panel shows the real duration before the first sample is played. Streams and 3DS wave sounds play one-shot.
+            - 3DS multi-channel streams are exposed as stereo layers (`c0-1`, `c2-3`, ...), each playable and exportable on its own, as a single multichannel WAV, or both.
+            - 3DS per-group variants are never guessed: `--group NAME` (or the Settings field) picks one, `--group-all` (or the export checkbox) writes one file per candidate group as `NAME__GROUP.wav`.
+            - A sound with no audio gets its manifest row only, no silent WAV.
+            - DSE: pitch bend follows the driver's own law (the value is a fraction of the bend range carried by the split) and the envelope duration multiplier is applied.
+            - ROMs whose audio is loose streams (no `.bcsar`) sort those streams by their RomFS folder and show it in the Info column.
 
             Pre-built binaries attached below: Windows (`DualRip.exe`), Linux x86_64 (`DualRip-linux`), macOS Apple Silicon (`DualRip-macos-arm64`) and macOS Intel (`DualRip-macos-x86_64`). Python users: `pip install -e .[gui]`.
             **Linux/macOS**: the download has no execute bit set — run `chmod +x DualRip-*` first.

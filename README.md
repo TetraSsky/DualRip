@@ -113,14 +113,7 @@ dualrip/export.py              WAV/manifest, public API: render_one / rip_archiv
 dualrip/cli.py, gui/           frontends
 ```
 
-Each console has a parsing half (`formats/<fmt>/`) and an engine half
-(`engine/<fmt>/`), split the same way: `sdat` for DS, `ctr` for 3DS. Deps go
-one way — parsing never imports its engine; the engine consumes parsed
-structures passed in (banks, wave samples, a bank-lookup callback), so
-`engine/*` never imports `formats/*`. `export.py` (DS) and the `CtrArchive`
-facade (3DS) bridge the two halves. Nothing outside `gui/` imports Qt. Golden
-tests in `tests/test_golden.py` (`DUALRIP_TEST_SDAT` for the DS half,
-`DUALRIP_TEST_CTR` for the 3DS half) pin both renderers bit-for-bit.
+Each console has a parsing half (`formats/<fmt>/`) and an engine half (`engine/<fmt>/`), split the same way: `sdat` for DS, `ctr` for 3DS. Deps go one way parsing never imports its engine the engine consumes parsed structures passed in (banks, wave samples, a bank-lookup callback), so `engine/*` never imports `formats/*`. `export.py` (DS) and the `CtrArchive` facade (3DS) bridge the two halves. Nothing outside `gui/` imports Qt. Golden tests in `tests/test_golden.py` pin both renderers bit-for-bit, one gate per format: `DUALRIP_TEST_SDAT` (DS), `DUALRIP_TEST_CTR` (3DS sequences, streams and layers, `DUALRIP_TEST_BOOT9` when the image is encrypted), `DUALRIP_TEST_STRM` and `DUALRIP_TEST_STRM_PCM8` (DS streams, PCM16 and PCM8)  `DUALRIP_TEST_DSE` (DS without an SDAT). Each half skips itself when its variable is unset, so a bare run stays green.
 
 ## Requirements
 
@@ -131,7 +124,7 @@ tests in `tests/test_golden.py` (`DUALRIP_TEST_SDAT` for the DS half,
 <a href="https://pypi.org/project/PySide6/"><img src="https://img.shields.io/badge/PySide6-6.0%2B-blue?style=flat-square&logo=PySide6&logoColor=white" alt="PySide6"></a>
 <a href="https://pypi.org/project/sounddevice/"><img src="https://img.shields.io/badge/sounddevice-0.4%2B-blue?style=flat-square&logo=sounddevice&logoColor=white" alt="sounddevice"></a>
 
-Decrypted `.cia`/`.3ds` files and loose `.bcsar` archives open with no extra requirement an encrypted ROM additionally needs the console's boot ROM dump (`boot9.bin`), set in Settings (GUI) or passed with `--boot9` (CLI). No game data included.
+Decrypted `.cia`/`.3ds` files and loose `.bcsar` archives open with no extra requirement an encrypted ROM additionally needs the console's boot ROM dump (`boot9.bin`), set in Settings (GUI or passed with `--boot9` (CLI). No game data included.
 
 ## Build
 
