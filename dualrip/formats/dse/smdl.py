@@ -107,9 +107,13 @@ def flatten_track(track_id, ev):
             out.append((cur, 'prog', track_id, ev[p]))
             p += 1
         elif b == 0xD7:
-            v = ev[p] | (ev[p + 1] << 8)
+            # the driver handler reads this pair big-endian (first byte is the high one)
+            v = (ev[p] << 8) | ev[p + 1]
             out.append((cur, 'bend', track_id, v - 65536 if v >= 32768 else v))
             p += 2
+        elif b == 0xDB:
+            out.append((cur, 'bend_range', track_id, ev[p]))
+            p += 1
         elif b == 0xE0:
             out.append((cur, 'vol', track_id, ev[p]))
             p += 1

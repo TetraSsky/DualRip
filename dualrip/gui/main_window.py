@@ -833,8 +833,13 @@ class MainWindow(QMainWindow):
             cat_strm.setData(0, ROLE_KIND, 'cstrmcat')
             cat_strm.setData(0, ROLE_ARC, 'STRM')
             cat_strm.setData(0, ROLE_SDAT, sdat_key)
-            for s in streams:
-                add_centry(cat_strm, 'STRM', s)
+            if arch.csar is None:
+                # loose RomFS streams keep one flat folder, sorted by directory then name
+                for s in sorted(streams, key=lambda x: (arch.stream_dir(x.index), x.name)):
+                    add_centry(cat_strm, 'STRM', s, arch.stream_dir(s.index).lstrip('/'))
+            else:
+                for s in streams:
+                    add_centry(cat_strm, 'STRM', s)
             root.addChild(cat_strm)
 
         def war_info(i):

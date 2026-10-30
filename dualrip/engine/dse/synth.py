@@ -46,8 +46,10 @@ ENV_32 = [
     0x00047B00, 0x7FFFFFFF]
 
 def env_ms(param, mult):
-    """Envelope duration parameter to milliseconds."""
-    return (ENV_32 if mult == 0 else ENV_16)[param & 0x7F]
+    """Envelope duration parameter to milliseconds, scaled by the driver's multiplier."""
+    if mult == 0:
+        return ENV_32[param & 0x7F]
+    return mult * ENV_16[param & 0x7F]
 
 class Voice:
     """One sounding note: a sample at a pitch, shaped by the ADSR envelope."""
@@ -57,8 +59,11 @@ class Voice:
         self.loop = sample.loop_enabled and sample.loop_len > 0
         self.loop_beg = sample.loop_beg
         self.loop_end = sample.loop_beg + sample.loop_len
-        self.base_step = (sample.sample_rate / out_rate) * (2.0 ** (semitones / 12.0))
+        self.rate_ratio = sample.sample_rate / out_rate
+        self.semitones = semitones
+        self.base_step = self.rate_ratio * (2.0 ** (semitones / 12.0))
         self.step = self.base_step
+        self.bend_range = 0 # split bend range
         self.pos = 0.0
         # quadratic volume curve (driver squares combined volume)
         self.amp2 = amp * amp
@@ -138,7 +143,8 @@ class Voice:
             self.dead = True
 
     def set_bend(self, bend_semitones):
-        self.step = self.base_step * (2.0 ** (bend_semitones / 12.0))
+        """Offset the pitch by a signed amount of semitones."""
+        self.step = self.rate_ratio * (2.0 ** ((self.semitones + bend_semitones) / 12.0))
 
     def release(self):
         if self.rel_at is None:
@@ -191,6 +197,7 @@ class LiveRenderer:
         self.expr = [127] * ntrk
         self.pan = [64] * ntrk
         self.bend = [0] * ntrk
+        self.bend_range = [0] * ntrk # per-track override of the split bend range (opcode 0xDB)
         self.bpm = 120
         self.voices = []
         self.active = {}
@@ -221,11 +228,11 @@ class LiveRenderer:
 
     def snapshot(self):
         """Restorable copy of the render state."""
-        state = (self.voices, self.active, self.prog, self.vol, self.expr, self.pan, self.bend)
+        state = (self.voices, self.active, self.prog, self.vol, self.expr, self.pan, self.bend, self.bend_range)
         memo = self._share_memo(self.preset, self.bank)
         for v in self.voices:
             memo[id(v.pcm)] = v.pcm
-        voices, active, prog, vol, expr, pan, bend = copy.deepcopy(state, memo)
+        voices, active, prog, vol, expr, pan, bend, bend_range = copy.deepcopy(state, memo)
         return {
             'events': self.events,
             'tpqn': self.tpqn,
@@ -242,6 +249,7 @@ class LiveRenderer:
             'expr': expr,
             'pan': pan,
             'bend': bend,
+            'bend_range': bend_range,
             'bpm': self.bpm,
             'voices': voices,
             'sounding': self.sounding,
@@ -263,15 +271,15 @@ class LiveRenderer:
         """Renderer rebuilt from a snapshot."""
         r = cls.__new__(cls)
         for name in ('events', 'tpqn', 'ntrk', 'preset', 'bank', 'out_rate', 'master',
-            'drain_held', 'block', 'prog', 'vol', 'expr', 'pan', 'bend',
+            'drain_held', 'block', 'prog', 'vol', 'expr', 'pan', 'bend', 'bend_range',
             'bpm', 'sounding', 'cur_tick', 'ev_index', 'gap_left', 'tail_left',
             'drain_left', 'drained', 'audible_end', 'phase', 'emitted', 'finished'):
             setattr(r, name, snap[name])
-        state = (snap['voices'], snap['active'], snap['prog'], snap['vol'], snap['expr'], snap['pan'], snap['bend'])
+        state = (snap['voices'], snap['active'], snap['prog'], snap['vol'], snap['expr'], snap['pan'], snap['bend'], snap['bend_range'])
         memo = cls._share_memo(snap['preset'], snap['bank'])
         for v in snap['voices']:
             memo[id(v.pcm)] = v.pcm
-        (r.voices, r.active, r.prog, r.vol, r.expr, r.pan, r.bend) = copy.deepcopy(state, memo)
+        (r.voices, r.active, r.prog, r.vol, r.expr, r.pan, r.bend, r.bend_range) = copy.deepcopy(state, memo)
         r.stats = None
         return r
 
@@ -301,7 +309,14 @@ class LiveRenderer:
         elif kind == 'pan':
             self.pan[ev[2]] = ev[3]
         elif kind == 'bend':
+            # driver rescales the bend offset of every live voice of that track
             self.bend[ev[2]] = ev[3]
+            for v in self.voices:
+                if v.tid == ev[2] and not v.dead:
+                    v.set_bend(bend_offset_q8(v.bend_range, ev[3]) / 256.0)
+        elif kind == 'bend_range':
+            # driver leaves live voices on their previous range
+            self.bend_range[ev[2]] = ev[3]
         elif kind == 'on':
             _t, _k, tid, midi, vel = ev
             picked = self._pick_split(self.prog[tid], midi, vel)
@@ -320,6 +335,10 @@ class LiveRenderer:
                 _count(self.stats, _mute_reason(vel, sp, pr, self.vol[tid], self.expr[tid]))
             v = Voice(sample, sp, semitones, amp, self.pan[tid], self.out_rate)
             v.tid = tid
+            # split carries the bend range (per track override when set)
+            v.bend_range = self.bend_range[tid] or sp.bend_range
+            if self.bend[tid]:
+                v.set_bend(bend_offset_q8(v.bend_range, self.bend[tid]) / 256.0)
             if amp > 0.0:
                 self.sounding += 1
             key = (tid, midi)
@@ -423,6 +442,10 @@ def _mute_reason(vel, split, program, track_vol, track_expr):
         return 'track expression zero'
     return 'silent amplitude'
 
+def bend_offset_q8(range_, bend):
+    """Bend offset in 1/256 semitone, as the driver computes it: (range * bend) >> 5."""
+    return (range_ * bend) >> 5
+
 def render(events, tpqn, ntrk, preset, bank, out_rate=32728, master=0.7, drain_held=False, stats=None):
     """Render a sequence of events to a stereo audio buffer."""
     prog = [0] * ntrk
@@ -430,6 +453,7 @@ def render(events, tpqn, ntrk, preset, bank, out_rate=32728, master=0.7, drain_h
     expr = [127] * ntrk
     pan = [64] * ntrk
     bend = [0] * ntrk
+    bend_range = [0] * ntrk # per-track override of the split bend range (opcode 0xDB)
     bpm = 120
     voices = []
     active = {}
@@ -471,7 +495,14 @@ def render(events, tpqn, ntrk, preset, bank, out_rate=32728, master=0.7, drain_h
         elif kind == 'pan':
             pan[ev[2]] = ev[3]
         elif kind == 'bend':
+            # the driver rescales the bend offset of every live voice of that track
             bend[ev[2]] = ev[3]
+            for v in voices:
+                if v.tid == ev[2] and not v.dead:
+                    v.set_bend(bend_offset_q8(v.bend_range, ev[3]) / 256.0)
+        elif kind == 'bend_range':
+            # stored only: the driver leaves live voices on their previous range
+            bend_range[ev[2]] = ev[3]
         elif kind == 'on':
             _t, _k, tid, midi, vel = ev
             picked = pick_split(prog[tid], midi, vel)
@@ -490,6 +521,10 @@ def render(events, tpqn, ntrk, preset, bank, out_rate=32728, master=0.7, drain_h
                 _count(stats, _mute_reason(vel, sp, pr, vol[tid], expr[tid]))
             v = Voice(sample, sp, semitones, amp, pan[tid], out_rate)
             v.tid = tid
+            # split carries the bend range (per track override when set)
+            v.bend_range = bend_range[tid] or sp.bend_range
+            if bend[tid]:
+                v.set_bend(bend_offset_q8(v.bend_range, bend[tid]) / 256.0)
             key = (tid, midi)
             if key in active:
                 active[key].release()

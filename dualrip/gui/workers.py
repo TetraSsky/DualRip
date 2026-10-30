@@ -601,7 +601,7 @@ class BatchWorker(_ThreadWorker):
     batch_done = Signal(object) # list of summaries
     failed = Signal(str)
 
-    def __init__(self, sdats, jobs, out_root, rate, override_map=None, stream_mode='multiple', parent=None):
+    def __init__(self, sdats, jobs, out_root, rate, override_map=None, stream_mode='multiple', group_all=False, parent=None):
         super().__init__(parent)
         self._sdats = sdats
         self._jobs = jobs
@@ -609,6 +609,7 @@ class BatchWorker(_ThreadWorker):
         self._rate = rate
         self._override = override_map
         self._stream_mode = stream_mode
+        self._group_all = group_all
         self._cancel = threading.Event()
 
     def cancel(self):
@@ -687,6 +688,7 @@ class BatchWorker(_ThreadWorker):
                         only=sel,
                         layers=layers,
                         stream_mode=self._stream_mode,
+                        all_groups=self._group_all,
                         progress=progress,
                         should_cancel=self._cancel.is_set,
                     )

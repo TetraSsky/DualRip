@@ -5,6 +5,7 @@ import os
 from PySide6.QtCore import QSettings
 from PySide6.QtGui import QFontDatabase, QPalette
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -46,6 +47,7 @@ def load_settings():
         'bank_map': s.value('bank_map', '') or '',
         'boot9': s.value('boot9', '') or '',
         'group': s.value('group', '') or '',
+        'group_all': s.value('group_all', False, type=bool),
         'stream_mode': s.value('stream_mode', STREAM_MODE_DEFAULT) or STREAM_MODE_DEFAULT,
     }
 
@@ -206,6 +208,11 @@ class ExportDialog(QDialog):
         mode_row.addWidget(self.cb_mode, 1)
         lay.addLayout(mode_row)
 
+        self.chk_groups = QCheckBox('Write one file per group variant when a sound is ambiguous')
+        self.chk_groups.setChecked(bool(settings.get('group_all')))
+        self.chk_groups.toggled.connect(self._groups_toggled)
+        lay.addWidget(self.chk_groups)
+
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setMaximumBlockCount(LOG_MAX_LINES)
@@ -330,6 +337,10 @@ class ExportDialog(QDialog):
                 return label
         return self._mode
 
+    def _groups_toggled(self, checked):
+        """Remember the group-variant choice with the other export settings."""
+        save_settings({'group_all': bool(checked)})
+
     def _mode_changed(self, *_):
         """Recompute the item count and the plan for chosen stream output."""
         self._mode = self.cb_mode.currentData() or STREAM_MODE_DEFAULT
@@ -350,7 +361,7 @@ class ExportDialog(QDialog):
         self.cb_mode.setEnabled(False)
         self.progress.setVisible(True)
         self.log.appendPlainText(f'Exporting to {out}')
-        self._worker = BatchWorker(self._sdats, self._jobs, out, self._rate, self._override, self.cb_mode.currentData() or STREAM_MODE_DEFAULT)
+        self._worker = BatchWorker(self._sdats, self._jobs, out, self._rate, self._override, self.cb_mode.currentData() or STREAM_MODE_DEFAULT, self.chk_groups.isChecked())
         self._worker.batch_progress.connect(self._on_progress)
         self._worker.archive_done.connect(self._on_archive_done)
         self._worker.batch_done.connect(self._on_done)

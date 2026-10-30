@@ -177,7 +177,7 @@ def _run_ctr(args):
     for folder in folders:
         members = archive.folders[folder]
         print(f'=== {folder}: {len(members)} sounds')
-        _print_summary(rip_ctr_folder(archive, folder, args.out, rate=args.rate, only=only, progress=_progress))
+        _print_summary(rip_ctr_folder(archive, folder, args.out, rate=args.rate, only=only, all_groups=args.group_all, progress=_progress))
     return 0
 
 def _run_dse(args, archive):
@@ -223,6 +223,7 @@ def main(argv=None):
     ap.add_argument('--only', type=int, nargs='*', help='render only these entry/sound indices')
     ap.add_argument('--bank-map', default='', help='NDS only: override bank resolution for NULL/dynamic slots, e.g. "4=32" or "4=32+33+43" (candidates tried in order, first full-coverage bank wins). Without this flag, resolution is automatic.',)
     ap.add_argument('--group', default='', metavar='NAME', help='3DS only: when a bank or wave archive exists in several per-group variants, pick the variant whose group label contains NAME (the error message lists the candidates). Without this flag, such a sound is reported as ambiguous instead of being guessed.',)
+    ap.add_argument('--group-all', action='store_true', help='3DS only: for an ambiguous sound, write one file per candidate group (NAME__GROUP.wav) instead of failing on it.',)
     ap.add_argument('--boot9', default=None, metavar='PATH', help='3DS only: console boot ROM dump (boot9.bin), needed to open an encrypted .cia/.3ds. Decrypted ROMs open without it.',)
     ap.add_argument('--version', action='version', version=f'DualRip {__version__}')
     args = ap.parse_args(argv)

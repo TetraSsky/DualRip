@@ -71,6 +71,7 @@ dualrip --file game.3ds --list
 | `--only I J...` | only these entry/sound indices |
 | `--bank-map "4=32+33"` | NDS only: override bank resolution |
 | `--group NAME` | 3DS only: pick the per-group variant whose label contains `NAME` (the error lists the candidates) |
+| `--group-all` | 3DS only: for an ambiguous sound, write one file per candidate group (`NAME__GROUP.wav`) instead of failing |
 | `--boot9 PATH` | 3DS only: path to the console's boot ROM dump (only required for encrypted ROMs) |
 
 GUI: open a `.sdat`/`.nds` or a 3DS `.cia`/`.3ds`/`.bcsar`, browse/filter, double-click to preview any sound effect or music track (seek, pause, loop on its own loop points), Ctrl/Shift-select sound effects, archives, sequences or 3DS folders and export. Files with several SDATs/CSARs let you pick several at once via the selection dialog. A multi-channel 3DS stream also lists its stereo layers (`c0-1`, `c2-3`, ...), each playable and exportable on its own.
@@ -90,7 +91,7 @@ A 3DS stream can carry more than two channels, and each stereo pair is an indepe
 
 Layers are never mixed: the file's channels are the data, a mix would be a choice the game makes per screen. Most players keep only the first pair of a multichannel WAV; a DAW shows every channel, and one layer can be extracted with `ffmpeg -i stream.wav -filter_complex "pan=stereo|c0=c2|c1=c3" layer.wav`.
 
-3DS CBNK banks don't have this null-slot mechanism, but the same file can exist in several per-group variants (the ROM ships one variant per course or sound set). DualRip never guesses between them: the sound is reported as ambiguous with the list of candidate groups, and `--group NAME` (CLI) or the `3DS group variant` field in Settings picks one. A rip is therefore naturally done per group when a game uses those variants.
+3DS CBNK banks don't have this null-slot mechanism, but the same file can exist in several per-group variants (the ROM ships one variant per course or sound set). DualRip never guesses between them: the sound is reported as ambiguous with the list of candidate groups, and `--group NAME` (CLI) or the `3DS group variant` field in Settings picks one. `--group-all` (CLI) or the matching export checkbox writes one file per candidate group instead.
 
 ## Credits
 

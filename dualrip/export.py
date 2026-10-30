@@ -326,6 +326,7 @@ def rip_ctr_folder(
     only=None,
     layers=None,
     stream_mode='multiple',
+    all_groups=False,
     progress=None,
     should_cancel=None,
 ):
@@ -358,7 +359,30 @@ def rip_ctr_folder(
         res, chans, native_rate, loop = render_ctr_one(
             archive, sound, rate, keep_audio=False)
         files = 0
-        if res.status in ('ok', 'loop'):
+        if all_groups and res.status == 'error' and ' one of: ' in (res.error or ''):
+            # a bank exists in several per-group variants: write the sound once per variant
+            labels = res.error.split(' one of: ', 1)[1].split(', ')
+            previous = getattr(archive.ctx, 'prefer_group', None)
+            for label in labels:
+                archive.set_prefer_group(label)
+                sub, sub_chans, sub_rate, sub_loop = render_ctr_one(
+                    archive, sound, rate, keep_audio=False)
+                if sub.status not in ('ok', 'loop'):
+                    continue
+                fn = f'{sanitize(sound.name)}__{sanitize(label)}.wav'
+                cstm.write_wav(os.path.join(out_dir, fn), sub_chans, sub_rate, sub_loop)
+                peak = max((abs(x) for ch in (sub_chans or []) for x in ch), default=0)
+                row = manifest_row(sound.index, sub, KIND_LABEL[sound.kind], _ctr_bank_cell(sound), sound.volume, peak)
+                row[1] = f'{sound.name} ({label})'
+                manifest.append(row)
+                counts[sub.status] += 1
+                files += 1
+                written += 1
+                total_files += 1 # variants are discovered while ripping, keep done/total coherent
+                if progress is not None:
+                    progress(written, total_files, sub)
+            archive.set_prefer_group(previous)
+        elif res.status in ('ok', 'loop'):
             wanted = (layers or {}).get(sound.index)
             total_layers = archive.stream_layers(sound) if KIND_LABEL[sound.kind] == 'strm' else 1
             if total_layers > 1:
