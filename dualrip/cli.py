@@ -33,6 +33,10 @@ def _run_nds(args):
         print('warning: --folder has no effect on NDS input, ignored (use --archive/--sequence)')
     if args.group:
         print('warning: --group has no effect on NDS input, ignored')
+    if args.stream_mode != 'multiple':
+        print('warning: --stream-mode has no effect on NDS input, ignored')
+    if args.layer:
+        print('warning: --layer has no effect on NDS input, ignored')
 
     if args.file.lower().endswith('.nds'):
         sdats = find_sdats_in_rom(args.file)
@@ -174,14 +178,33 @@ def _run_ctr(args):
         folders = folder_sel
 
     only = set(args.only) if args.only else None
+    layer_sel = sorted(set(args.layer)) if args.layer else None
     for folder in folders:
         members = archive.folders[folder]
         print(f'=== {folder}: {len(members)} sounds')
-        _print_summary(rip_ctr_folder(archive, folder, args.out, rate=args.rate, only=only, all_groups=args.group_all, progress=_progress))
+        layers = None
+        if layer_sel is not None:
+            chosen = [s for s in members if only is None or s.index in only]
+            bad = []
+            for s in chosen:
+                n = archive.stream_layers(s) if archive.kind_label(s) == 'strm' else 1
+                over = [k for k in layer_sel if k >= n]
+                if over:
+                    bad.append(f'{s.name} has {n} layer(s)')
+            if bad:
+                print(f'error: layer {layer_sel} out of range: {"; ".join(bad[:4])}')
+                return 1
+            layers = {s.index: layer_sel for s in chosen}
+        _print_summary(rip_ctr_folder(archive, folder, args.out, rate=args.rate, only=only, layers=layers, stream_mode=args.stream_mode, all_groups=args.group_all, progress=_progress))
     return 0
 
 def _run_dse(args, archive):
     from .export import rip_dse_folder
+
+    if args.stream_mode != 'multiple':
+        print('warning: --stream-mode has no effect on DSE input, ignored')
+    if args.layer:
+        print('warning: --layer has no effect on DSE input, ignored')
 
     if args.list:
         c = archive.counts()
@@ -224,6 +247,8 @@ def main(argv=None):
     ap.add_argument('--bank-map', default='', help='NDS only: override bank resolution for NULL/dynamic slots, e.g. "4=32" or "4=32+33+43" (candidates tried in order, first full-coverage bank wins). Without this flag, resolution is automatic.',)
     ap.add_argument('--group', default='', metavar='NAME', help='3DS only: when a bank or wave archive exists in several per-group variants, pick the variant whose group label contains NAME (the error message lists the candidates). Without this flag, such a sound is reported as ambiguous instead of being guessed.',)
     ap.add_argument('--group-all', action='store_true', help='3DS only: for an ambiguous sound, write one file per candidate group (NAME__GROUP.wav) instead of failing on it.',)
+    ap.add_argument('--stream-mode', choices=('multiple', 'single', 'both'), default='multiple', help='3DS only: how a multi-channel stream is written - multiple (one WAV per stereo layer, default), single (one WAV with every channel in order) or both.',)
+    ap.add_argument('--layer', type=int, nargs='+', metavar='N', help='3DS only: export only these stereo layers (0 = c0-1, 1 = c2-3, ...) of the selected streams.',)
     ap.add_argument('--boot9', default=None, metavar='PATH', help='3DS only: console boot ROM dump (boot9.bin), needed to open an encrypted .cia/.3ds. Decrypted ROMs open without it.',)
     ap.add_argument('--version', action='version', version=f'DualRip {__version__}')
     args = ap.parse_args(argv)

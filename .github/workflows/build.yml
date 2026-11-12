@@ -10,15 +10,19 @@ jobs:
           - os: windows-latest
             artifact: DualRip.exe
             spec: dualrip.spec
+            cli_artifact: DualRip-cli.exe
           - os: ubuntu-22.04
             artifact: DualRip-linux
             spec: dualrip_linux.spec
+            cli_artifact: DualRip-cli-linux
           - os: macos-latest
             artifact: DualRip-macos-arm64
             spec: dualrip_macos.spec
+            cli_artifact: DualRip-cli-macos-arm64
           - os: macos-15-intel
             artifact: DualRip-macos-x86_64
             spec: dualrip_macos.spec
+            cli_artifact: DualRip-cli-macos-x86_64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -43,3 +47,12 @@ jobs:
         with:
           name: ${{ matrix.artifact }}
           path: dist/${{ matrix.artifact }}
+      - run: pyinstaller dualrip_cli.spec
+      - name: Rename CLI per-platform
+        if: matrix.os != 'windows-latest'
+        run: mv dist/DualRip-cli dist/${{ matrix.cli_artifact }}
+        shell: bash
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.cli_artifact }}
+          path: dist/${{ matrix.cli_artifact }}
