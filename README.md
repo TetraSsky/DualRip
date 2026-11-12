@@ -72,6 +72,8 @@ dualrip --file game.3ds --list
 | `--bank-map "4=32+33"` | NDS only: override bank resolution |
 | `--group NAME` | 3DS only: pick the per-group variant whose label contains `NAME` (the error lists the candidates) |
 | `--group-all` | 3DS only: for an ambiguous sound, write one file per candidate group (`NAME__GROUP.wav`) instead of failing |
+| `--stream-mode MODE` | 3DS only: `multiple` (one WAV per stereo layer, default), `single` (one WAV with every channel in order) or `both` |
+| `--layer N...` | 3DS only: export only these stereo layers (`0` = `c0-1`, `1` = `c2-3`, ...) of the selected streams |
 | `--boot9 PATH` | 3DS only: path to the console's boot ROM dump (only required for encrypted ROMs) |
 
 GUI: open a `.sdat`/`.nds` or a 3DS `.cia`/`.3ds`/`.bcsar`, browse/filter, double-click to preview any sound effect or music track (seek, pause, loop on its own loop points), Ctrl/Shift-select sound effects, archives, sequences or 3DS folders and export. Files with several SDATs/CSARs let you pick several at once via the selection dialog. A multi-channel 3DS stream also lists its stereo layers (`c0-1`, `c2-3`, ...), each playable and exportable on its own.
@@ -131,8 +133,11 @@ Decrypted `.cia`/`.3ds` files and loose `.bcsar` archives open with no extra req
 ```
 pip install -e .[gui] pyinstaller
 pyinstaller dualrip.spec          # dualrip_linux.spec / dualrip_macos.spec elsewhere
+pyinstaller dualrip_cli.spec      # console build: no Qt, no audio device
 ```
 
 One-file build, bundles Python, PySide6 and the icon. `build_exe.bat` / `build_linux.sh` / `build_macos.sh` wrap the same command per platform.
 Linux needs `libportaudio2` and the Qt xcb libs installed on the build machine (see the `apt-get` step in `.github/workflows/release.yml`).
 Pre-built binaries for Windows, Linux and macOS are available on the releases page.
+
+*(CLI builds are the same but without Qt or audio device).*
